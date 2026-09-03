@@ -3520,6 +3520,79 @@ local STORAGE_ROW_HEIGHT = 24
 -- Helpers (file-local)
 -------------------------------------------------------------------------------
 
+-- Empty band kept above the first row / below the last one so the first and last
+-- slots stay reachable for drag-to-reorder.
+local LIST_END_DROP_ZONE = 8
+
+-- Drag-to-reorder for a single-column, one-row-per-item ScrollBox whose order is
+-- meaningful (Storage rules, Restock rules) - the same family as the character-select
+-- list. The default init wires up the drag cursor + drop-line previews; SetReorderable
+-- turns a drop into a real reorder of the data provider; the pure-insertion predicate
+-- forbids the default "Inside = swap" so a drop always inserts above/below a neighbour.
+-- SetPostDrop reads the new order back out of the provider and commits it via opts,
+-- then repaints.
+--
+-- opts.entryType    - elementData.type marking a draggable row ("rule" / "entry")
+-- opts.entryKey     - elementData field holding the backing item (".asn" / ".entry")
+-- opts.listKey      - db.global key of the ordered array to rewrite
+-- opts.rowHeight    - row extent, used to size the insert hit-band
+-- opts.afterReorder - optional side effects (cache invalidation, etc.)
+local function InitListDragToReorder(page, opts)
+    -- Reserve an empty band above the first row and below the last one. This is what
+    -- makes the first/last slots reachable: hovering the band reads as an
+    -- insert-before-first / insert-after-last drop. Without it, with the list scrolled
+    -- to the top there is nothing above row 1 to aim at, so slot 1 is unreachable.
+    page.ScrollBox:GetView():SetPadding(LIST_END_DROP_ZONE, LIST_END_DROP_ZONE, 0, 0, 0)
+
+    local dragBehavior = ScrollUtil.InitDefaultLinearDragBehavior(page.ScrollBox)
+    dragBehavior:SetReorderable(true)
+    dragBehavior:SetDragPredicate(function(_frame, elementData)
+        return elementData.type == opts.entryType
+    end)
+    -- Split each row on its vertical midpoint (top half -> insert above, bottom half ->
+    -- insert below), removing the default "Inside = swap" band; the drop predicate then
+    -- guards the exact midpoint so an "onto a row" drop can never fall into the swap path.
+    dragBehavior:SetAreaIntersectMargin(opts.rowHeight * 0.5)
+    dragBehavior:SetDropPredicate(function(_sourceElementData, contextData)
+        return contextData.area ~= DragIntersectionArea.Inside
+    end)
+    dragBehavior:SetPostDrop(function(contextData)
+        local dataProvider = contextData.dataProvider
+        if not dataProvider then
+            return
+        end
+
+        local ordered = {}
+        for _, elementData in dataProvider:Enumerate() do
+            if elementData.type == opts.entryType then
+                ordered[#ordered + 1] = elementData[opts.entryKey]
+            end
+        end
+
+        local list = EmpireManager.db.global[opts.listKey]
+        for i = 1, #ordered do
+            list[i] = ordered[i]
+        end
+        for i = #ordered + 1, #list do
+            list[i] = nil
+        end
+
+        if opts.afterReorder then
+            opts.afterReorder()
+        end
+
+        -- Repaint via the page's own Refresh. The ScrollBox re-populates rows
+        -- synchronously during the drop, i.e. before this callback runs, so the
+        -- up/down arrow enabled states (derived from the row index) are computed
+        -- against the pre-move order and go stale - most visibly on the new first /
+        -- last rows. Refresh rebuilds from the saved list, recomputing every index.
+        -- Deferred a frame so it can't fight the drag behaviour's frame release.
+        C_Timer.After(0, function()
+            page:Refresh()
+        end)
+    end)
+end
+
 -- Returns true if an assignment references a character no longer in the registry.
 local function IsOrphanedAssignment(asn)
     if not asn or asn.type ~= "charbank" then
@@ -4129,6 +4202,21 @@ function EMStoragePageMixin:OnLoad()
 
     -- Column headers
     self:InitStorageHeaders()
+
+    -- Drag-to-reorder (needs the ScrollBox initialized above)
+    self:InitDragToReorder()
+end
+
+function EMStoragePageMixin:InitDragToReorder()
+    InitListDragToReorder(self, {
+        entryType = "rule",
+        entryKey = "asn",
+        listKey = "storageAssignments",
+        rowHeight = STORAGE_ROW_HEIGHT,
+        afterReorder = function()
+            EmpireManager:InvalidateStorageCache()
+        end,
+    })
 end
 
 function EMStoragePageMixin:InitStorageHeaders()
@@ -5695,6 +5783,9 @@ function EMRestockPageMixin:OnLoad()
     -- Column headers
     self:InitRestockHeaders()
 
+    -- Drag-to-reorder (needs the ScrollBox initialized above)
+    self:InitDragToReorder()
+
     -- Private GET_ITEM_INFO_RECEIVED listener: refresh the page when item data for
     -- a watched itemID lands (load-on-demand for names/icons/tiers).
     self._itemWatch = {}
@@ -5727,6 +5818,19 @@ function EMRestockPageMixin:OnLoad()
             end
         end)
     end)
+end
+
+function EMRestockPageMixin:InitDragToReorder()
+    InitListDragToReorder(self, {
+        entryType = "entry",
+        entryKey = "entry",
+        listKey = "restockList",
+        rowHeight = RESTOCK_ROW_HEIGHT,
+        afterReorder = function()
+            EmpireManager:InvalidateStorageCache() -- priority changed: recalc triage
+            EmpireManager:RefreshTriageIfOpen()
+        end,
+    })
 end
 
 function EMRestockPageMixin:InitRestockHeaders()
