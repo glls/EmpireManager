@@ -901,6 +901,17 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [5637] = { "alchemy", "blacksmithing", "jewelcrafting", "leatherworking" }, -- Large Fang
     [11291] = { "enchanting", "engineering", "leatherworking" }, -- Star Wood (not Alchemy at all)
     [2880] = { "blacksmithing", "engineering" }, -- Weak Flux (not Alchemy at all)
+    -- Flux (Metal & Stone 7/7). The subclass is shared by Blacksmithing,
+    -- Engineering, Mining and Jewelcrafting, so a Mining rule sitting above the
+    -- Blacksmithing rule claims these. Flux is a smithing consumable ("used for
+    -- removing impurities from metal", sold by Blacksmithing vendors) with no
+    -- Mining or Jewelcrafting use, so the override strips both.
+    [18567] = { "blacksmithing" },  -- Elemental Flux
+    [190452] = { "blacksmithing" }, -- Primal Flux
+    [226202] = { "blacksmithing" }, -- Echoing Flux
+    [180733] = { "blacksmithing" }, -- Luminous Flux
+    [243060] = { "blacksmithing" }, -- Luminant Flux
+    [3466] = { "blacksmithing" },   -- Strong Flux (7/11, "used by blacksmiths to remove impurities")
     [2324] = { "leatherworking", "tailoring" }, -- Bleach (not Alchemy at all)
     [251768] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Darkpine Lumber
     [191475] = { "alchemy", "engineering", "inscription" }, -- Draconic Vial (2nd variant)

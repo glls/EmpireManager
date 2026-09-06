@@ -1718,11 +1718,11 @@ function EmpireManager:ClassifyItem(item, entry)
             destTabs = nil,
         }
     end
-    local category, action, routing, blocked = self:_ClassifyItemInner(item, entry)
+    local category, action, routing, blocked, blockedRules = self:_ClassifyItemInner(item, entry)
     if entry.ignoreStorageRules and (category == CAT_STASH or category == CAT_ROUTE) then
         return CAT_KEEP, "Ignoring storage rules"
     end
-    return category, action, routing, blocked
+    return category, action, routing, blocked, blockedRules
 end
 
 function EmpireManager:_ClassifyItemInner(item, entry)
@@ -1748,6 +1748,23 @@ function EmpireManager:_ClassifyItemInner(item, entry)
     local capacityBlocked = false
     local itemStackable = (item.maxStack or 1) > 1
     local blockedStackAsn, blockedStackRule = nil, nil
+    -- Every rule index skipped for lack of capacity, in match order. The blocked
+    -- result carries no routing (that is what keeps it out of the deposit move
+    -- list), so this is the only record of WHICH rules were full - the tooltip
+    -- needs it to name them instead of showing a bare message.
+    local blockedRules = nil
+    local function NoteBlocked(ruleIndex)
+        if not ruleIndex then
+            return
+        end
+        blockedRules = blockedRules or {}
+        for _, idx in ipairs(blockedRules) do
+            if idx == ruleIndex then
+                return
+            end
+        end
+        blockedRules[#blockedRules + 1] = ruleIndex
+    end
     local function HasCapacity(assignment, ruleIndex)
         if item.bankType then
             return true -- reorganizing - bind/capacity checks deferred to Blizzard
@@ -1755,6 +1772,7 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         if self:HasFreeCapacity(assignment) then
             return true
         end
+        NoteBlocked(ruleIndex)
         if itemStackable then
             -- Remember the first full-but-maybe-mergeable rule; keep looking for
             -- a rule with real free space before falling back to this one.
@@ -2334,7 +2352,10 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         capacityBlocked = true
     end
     if capacityBlocked then
-        return CAT_STASH, "All matching destinations are full", nil, true
+        -- routing stays nil: that is what excludes the row from the deposit
+        -- move list and the [Deposit All Stash] count. The rule indices ride
+        -- along separately so the tooltip can name the full destinations.
+        return CAT_STASH, "All matching destinations are full", nil, true, blockedRules
     end
 
     -- Rule B.4: Auctioneer / Disenchant - any unbound BoE item
@@ -2737,7 +2758,7 @@ function EmpireManager:RunTriage()
 
     for _, item in ipairs(bagItems) do
         item._restockSurplus = nil -- reset per scan; set by the restock-floor rule
-        local category, action, routing, blocked = self:ClassifyItem(item, entry)
+        local category, action, routing, blocked, blockedRules = self:ClassifyItem(item, entry)
         -- routeCount = units this row actually moves. Whole stack normally; when a slot
         -- straddles the restock floor, only the surplus above the floor (the floor stays
         -- in bags). Display + mail/deposit read routeCount and split at action time.
@@ -2752,6 +2773,7 @@ function EmpireManager:RunTriage()
             action = action,
             routing = routing,
             blocked = blocked,
+            blockedRules = blockedRules,
         }
     end
     self._classifyCtx = nil
@@ -3027,7 +3049,7 @@ function EmpireManager:RunTriageAsync(callback)
         local results = {}
         for _, item in ipairs(bagItems) do
             item._restockSurplus = nil -- reset per scan; set by the restock-floor rule
-            local category, action, routing, blocked = addon:ClassifyItem(item, entry)
+            local category, action, routing, blocked, blockedRules = addon:ClassifyItem(item, entry)
             -- routeCount = surplus above a straddled restock floor (floor stays in bags),
             -- else nil = whole stack. Display + mail/deposit split at action time.
             if (category == CAT_ROUTE or category == CAT_STASH) and item._restockSurplus then
@@ -3041,6 +3063,7 @@ function EmpireManager:RunTriageAsync(callback)
                 action = action,
                 routing = routing,
                 blocked = blocked,
+                blockedRules = blockedRules,
             }
             yieldCheck()
         end

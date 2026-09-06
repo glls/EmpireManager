@@ -2,7 +2,7 @@
 ## Title: EmpireManager
 ## Notes: One addon to manage every alt, every bag, every bank.
 ## Author: l0neshad0w
-## Version: 1.2.4
+## Version: 1.2.5
 ## SavedVariables: EmpireManagerDB
 ## IconTexture: Interface\AddOns\EmpireManager\textures\logo256
 ## OptionalDeps: TradeSkillMaster, Pawn

@@ -2163,6 +2163,45 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
             GameTooltip:AddLine(string.format("|cffffd100Default routing|r  %s", sysRule.role), 1, 1, 1)
             GameTooltip:AddLine(sysRule.desc, 0.8, 0.8, 0.8, true)
             hasRuleBlock = true
+        elseif result.blockedRules and #result.blockedRules > 0 then
+            -- Capacity-blocked row: there is no winning rule to name (routing is
+            -- nil by design), so list every rule that matched but was full. This
+            -- is what tells the user which rule to reorder or free space on.
+            local rules = EmpireManager.db and EmpireManager.db.global and EmpireManager.db.global.storageAssignments
+                or {}
+            local added = false
+            for _, idx in ipairs(result.blockedRules) do
+                local rule = rules[idx]
+                if rule then
+                    if not added then
+                        GameTooltip:AddLine(" ")
+                        added = true
+                    end
+                    local pInfo = EmpireManager.PROF_INFO_BY_KEY[rule.profession]
+                    local label = pInfo and pInfo.label or rule.profession or "?"
+                    local total, pos = 0, 0
+                    for i, r in ipairs(rules) do
+                        if r.profession == rule.profession then
+                            total = total + 1
+                            if i == idx then
+                                pos = total
+                            end
+                        end
+                    end
+                    local suffix = total > 1 and string.format(" (%d/%d)", pos, total) or ""
+                    GameTooltip:AddDoubleLine(
+                        string.format("|cffffd100Rule #%d|r  %s%s", idx, label, suffix),
+                        "full",
+                        1,
+                        1,
+                        1,
+                        1,
+                        0.3,
+                        0.3
+                    )
+                end
+            end
+            hasRuleBlock = added
         end
 
         -- Calculated destination (trailing "(...)" split onto its own line, no parens)

@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.5] - 2026-09-06
+
+### Added
+
+- **Drag a rule to reorder it.** Rules in the Rules and Stock tabs can now be dragged into place, as well as moved with the up and down buttons. Thanks @Cieper.
+- **Open Chat Copy from the minimap menu**, alongside `/em cc`.
+
+### Fixed
+
+- **Flux was routed to your Mining banker instead of Blacksmithing.** Flux sits in the same category as ore, so whichever rule came first claimed it. Flux now goes to Blacksmithing whatever order your rules are in. Ore is unaffected. Reported by @Cieper.
+
+### Changed
+
+- **A Triage item that cannot be stashed because your banks are full now names the rules that are full.** The tooltip lists each one, so you know which rule to reorder or make space on instead of only being told a limit was hit.
+
 ## [1.2.4] - 2026-09-02
 
 ### Added
