@@ -817,6 +817,12 @@ function EmpireManager:AnchorTriageOverlay()
         f:ClearAllPoints()
         f:SetPoint("TOPLEFT", MerchantFrame, "TOPRIGHT", 2, 0)
     elseif MailFrame and MailFrame:IsShown() then
+        -- Blizzard's mail UI only. Do NOT add named-frame branches for
+        -- replacement mail addons here - there is no API to locate another
+        -- addon's window, and enumerating them never ends. When the visible
+        -- mail UI is not MailFrame, no branch matches and the overlay simply
+        -- keeps its current (user-dragged or last-used) position, which is the
+        -- addon-agnostic outcome.
         f:SetHeight(fit(MailFrame:GetHeight()))
         f:ClearAllPoints()
         f:SetPoint("TOPLEFT", MailFrame, "TOPRIGHT", 2, 0)
@@ -3282,14 +3288,17 @@ function EmpireManager:OnMailShow()
 end
 
 -------------------------------------------------------------------------------
--- Mail button state (reacts to tab switches)
+-- Mail button state
 -------------------------------------------------------------------------------
 
--- True when MAIL_SHOW has fired and MAIL_CLOSED has not. The mail send APIs
--- (ClearSendMail, ClickSendMailItemButton, SendMail) work whenever this is
--- true - they don't care if Blizzard's MailFrame is visible. TSM hides
--- MailFrame entirely while its own UI is up, so checking MailFrame:IsShown()
--- would incorrectly disable our send flow.
+-- True when MAIL_SHOW has fired and MAIL_CLOSED has not. This is the ONLY
+-- gate on the send flow, and it is deliberately addon-agnostic: the mail send
+-- APIs (ClearSendMail, ClickSendMailItemButton, SendMail) are stateless C
+-- functions driven by mailbox state, not by any frame's visibility. Never gate
+-- sending on MailFrame/SendMailFrame - replacement mail addons (TSM, Postal,
+-- ElvUI, PostBox, ...) hide or replace those, and we'd disable ourselves for
+-- no reason. Correctness is enforced downstream by the zero-attachment abort
+-- in SendMailToRecipient, which is equally UI-independent.
 function EmpireManager:IsMailboxOpen()
     return self.mailboxOpen == true
 end
@@ -3304,20 +3313,11 @@ function EmpireManager:UpdateMailBtnState()
         return
     end
     btn:Show()
-    -- Send-tab gate only applies when Blizzard's MailFrame is the active UI.
-    -- With TSM (or any addon that hides MailFrame), the SendMail API works
-    -- regardless of which tab the player would be on visually.
-    local blizzardMailVisible = MailFrame and MailFrame:IsShown()
-    local sendTabOpen = (not blizzardMailVisible) or (SendMailFrame and SendMailFrame:IsShown())
     local hasRoute = btn._hasRoute
     local routeCount = btn._routeCount or 0
     if not hasRoute then
         btn:SetText("Mail All Routable")
         btn._disabledReason = "Nothing to route"
-        btn:Disable()
-    elseif not sendTabOpen then
-        btn:SetText("Mail All Routable")
-        btn._disabledReason = "Switch to the Send Mail tab"
         btn:Disable()
     elseif self.mailConfirmFrame or self._mailingSending then
         btn:SetText("Mailing...")
@@ -3914,8 +3914,17 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
 
         local b = batches[batchIndex]
         ClearSendMail()
-        SendMailNameEditBox:SetText(recipient)
-        SendMailSubjectEditBox:SetText("EmpireManager Triage")
+        -- Cosmetic only. SendMail() below takes recipient and subject as
+        -- arguments; Blizzard's own SendMailFrame_SendMail reads these edit
+        -- boxes purely because that is where the player typed. Mirroring keeps
+        -- Blizzard's UI in sync when it happens to be the visible mail UI, and
+        -- the nil guards keep a replacement mail addon from breaking the send.
+        if SendMailNameEditBox then
+            SendMailNameEditBox:SetText(recipient)
+        end
+        if SendMailSubjectEditBox then
+            SendMailSubjectEditBox:SetText("EmpireManager Triage")
+        end
 
         -- Attach items via pickup + ClickSendMailItemButton. This pattern
         -- works whether or not SendMailFrame is visible (TSM and other mail

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.6] - 2026-09-08
+
+### Fixed
+
+- **Mail All Routable no longer requires Blizzard's Send Mail tab.** It works from the Inbox tab, and alongside mail addons that hide or replace Blizzard's mail window.
+
 ## [1.2.5] - 2026-09-06
 
 ### Added

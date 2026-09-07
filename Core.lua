@@ -2863,17 +2863,13 @@ end
 
 function EmpireManager:MAIL_SHOW()
     self.mailboxOpen = true
-    -- Hook mail tab switches so the Mail button enables/disables live
-    if not self._mailTabHooked and type(MailFrameTab_OnClick) == "function" then
-        hooksecurefunc("MailFrameTab_OnClick", function()
-            self:SendMessage("EM_MAIL_BTN_UPDATE")
-        end)
-        self._mailTabHooked = true
-    end
-
     self:SendMessage("EM_MAIL_SHOW")
 
-    -- Deferred update: MailFrame may not be visible yet when our handler fires
+    -- Deferred update so the button picks up the triage scan results that the
+    -- EM_MAIL_SHOW handlers kick off. Intentionally no MailFrameTab_OnClick
+    -- hook: the send flow is gated on mailboxOpen alone, so which tab the
+    -- player is looking at (or whether a replacement mail addon has tabs at
+    -- all) is none of our business.
     C_Timer.After(0, function()
         self:SendMessage("EM_MAIL_BTN_UPDATE")
     end)
