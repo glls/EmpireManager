@@ -2789,13 +2789,14 @@ function EmpireManager:RunTriage()
         if oa ~= ob then
             return oa < ob
         end
-        -- Within VENDOR rows, sort by quality DESC so uncommon+ gear floats to
-        -- the top of the section (more visible to the user before bulk vendor).
+        -- Within VENDOR rows, sort by quality ASC, same as RunTriageAsync. Vendor All
+        -- sells in this order, and the merchant buyback list keeps only the last 12
+        -- items sold: the best items must go last so they stay recoverable.
         if a.category == CAT_VENDOR then
             local qa = a.item.quality or 0
             local qb = b.item.quality or 0
             if qa ~= qb then
-                return qa > qb
+                return qa < qb
             end
             return a.item.itemName < b.item.itemName
         end

@@ -276,11 +276,6 @@ function EMSidecarMixin:Init()
             end
             local text = eb:GetText()
             entry.storageNote = text
-            if guid == EmpireManager.playerGUID then
-                EmpireManager.db.char.storageNote = text
-            else
-                entry.dirtyFromSidecar = true
-            end
             if EmpireManager.ledgerScroll then
                 EmpireManager:RefreshVisibleRows()
             end
@@ -362,12 +357,7 @@ function EMSidecarMixin:Track(obj)
     return obj
 end
 
-function EMSidecarMixin:SyncAssignments(entry, _guid, isCurrentChar)
-    if isCurrentChar then
-        EmpireManager.db.char.assignments = entry.assignments
-    else
-        entry.dirtyFromSidecar = true
-    end
+function EMSidecarMixin:SyncAssignments()
     if EmpireManager.ledgerScroll then
         EmpireManager:RefreshVisibleRows()
     end
@@ -375,10 +365,10 @@ end
 
 -- Deferred sync+refresh to avoid tainting Blizzard secure widgets (ScrollBox, etc.)
 -- All callbacks that modify data AND rebuild UI should go through this.
-function EMSidecarMixin:DeferredRefresh(entry, guid, isCurrentChar, syncType)
+function EMSidecarMixin:DeferredRefresh(_entry, guid, _isCurrentChar, syncType)
     C_Timer.After(0, function()
         if syncType == "assignments" or syncType == "both" then
-            self:SyncAssignments(entry, guid, isCurrentChar)
+            self:SyncAssignments()
             EmpireManager:OnTriageOptionChanged()
         end
         self:Populate(guid)
@@ -783,8 +773,8 @@ function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
     addRow("Warband", FormatMoneyGSC(EmpireManager.db.global.warbandGold or 0))
 
     -- Auto-Balance: keep this character's bag gold between a low and high amount
-    -- by moving gold to/from warband gold. Whole-gold input, stored as copper in
-    -- db.char (synced to the registry entry on login - see Core.lua). 0 = that
+    -- by moving gold to/from warband gold. Whole-gold input, stored as copper on
+    -- the registry entry (entry.goldLow / goldHigh). 0 = that
     -- side off; low must be <= high. The transfer itself runs on warband bank
     -- open (see EmpireManager:MaybeWarbandGoldTransfer), gated by the General
     -- "Auto transfer gold at Warband Bank" option.
@@ -815,11 +805,6 @@ function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
             return
         end
         entry[field] = copper
-        if isCurrentChar then
-            EmpireManager.db.char[field] = copper
-        else
-            entry.dirtyFromSidecar = true
-        end
         box:ClearFocus()
     end
 
@@ -968,11 +953,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         currentSort = num
         self:SetText(num > 0 and tostring(num) or "")
         self:ClearFocus()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.sortOrder = num
-        else
-            entry.dirtyFromSidecar = true
-        end
         if EmpireManager.dashboardFrame and EmpireManager.dashboardFrame:IsShown() then
             EmpireManager:ApplyFilters()
         end
@@ -1044,11 +1024,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     ahCB:SetScript("OnClick", function(self)
         entry.auctioneerKeepBOE = self:GetChecked()
         EmpireManager:OnTriageOptionChanged()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.auctioneerKeepBOE = entry.auctioneerKeepBOE
-        else
-            entry.dirtyFromSidecar = true
-        end
     end)
     y = y + 32
 
@@ -1097,11 +1072,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     deCB:SetScript("OnClick", function(self)
         entry.enchanterKeepDE = self:GetChecked()
         EmpireManager:OnTriageOptionChanged()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.enchanterKeepDE = entry.enchanterKeepDE
-        else
-            entry.dirtyFromSidecar = true
-        end
     end)
     y = y + 32
 
@@ -1150,11 +1120,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     profMatCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBank = self:GetChecked()
         EmpireManager:OnTriageOptionChanged()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.keepOwnProfMatsInBank = entry.keepOwnProfMatsInBank
-        else
-            entry.dirtyFromSidecar = true
-        end
     end)
     y = y + 28
 
@@ -1201,11 +1166,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     bagMatCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBags = self:GetChecked()
         EmpireManager:OnTriageOptionChanged()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.keepOwnProfMatsInBags = entry.keepOwnProfMatsInBags
-        else
-            entry.dirtyFromSidecar = true
-        end
         if bagMatLatestCB then
             local subEnabled = hasAnyProf and (entry.keepOwnProfMatsInBags == true)
             bagMatLatestCB:SetEnabled(subEnabled)
@@ -1268,11 +1228,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     bagMatLatestCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBagsLatestOnly = self:GetChecked()
         EmpireManager:OnTriageOptionChanged()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.keepOwnProfMatsInBagsLatestOnly = entry.keepOwnProfMatsInBagsLatestOnly
-        else
-            entry.dirtyFromSidecar = true
-        end
     end)
     y = y + 28
 
@@ -1313,11 +1268,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     questCB:SetScript("OnClick", function(self)
         entry.stashOldQuestItems = self:GetChecked()
         EmpireManager:OnTriageOptionChanged()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.stashOldQuestItems = entry.stashOldQuestItems
-        else
-            entry.dirtyFromSidecar = true
-        end
     end)
     y = y + 28
 
@@ -1358,11 +1308,6 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     skipCB:SetScript("OnClick", function(self)
         entry.ignoreStorageRules = self:GetChecked()
         EmpireManager:OnTriageOptionChanged()
-        if guid == EmpireManager.playerGUID then
-            EmpireManager.db.char.ignoreStorageRules = entry.ignoreStorageRules
-        else
-            entry.dirtyFromSidecar = true
-        end
     end)
     y = y + 44
 

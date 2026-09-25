@@ -39,8 +39,6 @@ local DB_DEFAULTS = {
             charbank = {}, -- [guid] = { [tabIndex] = { total, used } }
         },
         schemaVersion = 1,
-        lastReset = 0,
-        lastWeeklyReset = 0,
         charBlacklist = {}, -- [guid] = "Name - Realm"; excluded from data collection
         keepList = {}, -- [itemID] = "Item Name"; protected from all triage actions (vendor, mail, stash)
         vendorWhitelist = {}, -- [itemID] = "Item Name"; always vendored regardless of rules
@@ -75,18 +73,18 @@ local DB_DEFAULTS = {
             clampToScreen = true, -- keep addon windows inside the screen bounds
         },
     },
-    char = {
-        assignments = {}, -- roleKey → { profKey = true, ... }; simple roles = {}
-        storageNote = "",
-        sortOrder = 0, -- custom sort priority for dashboard grid (lower = higher)
-        auctioneerKeepBOE = true, -- Auctioneer: keep BoE equipment instead of routing
-        enchanterKeepDE = true, -- Enchanter: keep vendor gear for disenchanting
-        keepOwnProfMatsInBank = false, -- Keep own profession materials in character bank
-        keepOwnProfMatsInBags = false, -- Keep own profession materials in bags
-        keepOwnProfMatsInBagsLatestOnly = false, -- Sub-option: only apply Keep-in-Bags to latest-expansion mats
-        stashOldQuestItems = false, -- Route soulbound Quest items from previous expansions to own bank
-        ignoreStorageRules = false, -- Exempt this character from all Storage-tab routing (stash/mail/takeout/reorganize)
-    },
+    -- No `char` section: per-character settings live on the registry entry, keyed
+    -- by GUID so they survive renames (AceDB's char key is "Name - Realm"). A nil
+    -- setting means its default, and every reader treats it that way:
+    --   assignments        roleKey -> { profKey = true, ... }; simple roles = {}
+    --   storageNote        ""
+    --   sortOrder          0, custom dashboard sort priority (lower = higher)
+    --   auctioneerKeepBOE  true, keep BoE equipment instead of routing
+    --   enchanterKeepDE    true, keep vendor gear for disenchanting
+    --   keepOwnProfMatsInBank / keepOwnProfMatsInBags / keepOwnProfMatsInBagsLatestOnly  false
+    --   stashOldQuestItems false, route old soulbound quest items to own bank
+    --   ignoreStorageRules false, exempt this character from all Storage routing
+    --   goldLow / goldHigh 0, warband gold auto-balance bounds (copper)
 }
 
 function EmpireManager:OnInitialize()
@@ -209,6 +207,75 @@ function EmpireManager:OnInitialize()
         end
     end
 
+    -- Drop data left behind by the removed mission/cooldown system. Nothing reads
+    -- it, and knownCooldownRecipes alone was ~10% of a 50-character save file.
+    self.db.global.accountMissions = nil
+    self.db.global.uiStatus = nil -- old saved window position, no longer persisted
+    self.db.global.choreHUDPos = nil -- removed chore system
+    self.db.global.lastReset = nil -- removed mission/chore reset timestamps
+    self.db.global.lastWeeklyReset = nil
+    self.db.global.vendorBlacklist = nil -- renamed to keepList in 3897499 (data not carried over)
+    for _, entry in pairs(registry) do
+        entry.knownCooldownRecipes = nil
+        entry.missions = nil
+        entry._stub = nil -- write-only flag; stubs are identified by the "API-" GUID prefix
+        entry.keepOwnProfMats = nil -- split into keepOwnProfMatsInBank / InBags
+        entry.triageVendorThreshold = nil
+        entry.playedLevel = nil -- was saved from TIME_PLAYED_MSG, never displayed
+        for _, prof in ipairs(entry.professions or {}) do
+            -- Tier rows keep only { expansionID, skill, maxSkill }. Older rows also
+            -- carried skillLineID and the localized expansionName; resolve the ID
+            -- from them if missing, and drop rows that resolve to nothing (the
+            -- base-profession aggregates IsBogusExpansionSkillRow filters out).
+            if type(prof.expansionSkills) == "table" then
+                local kept = {}
+                for _, row in ipairs(prof.expansionSkills) do
+                    local id = row.expansionID
+                        or (row.skillLineID and self.EXPANSION_ID_BY_TIER_LINE[row.skillLineID])
+                        or self:ExpansionIDFromAPIName(row.expansionName)
+                    if id then
+                        kept[#kept + 1] = { expansionID = id, skill = row.skill, maxSkill = row.maxSkill }
+                    end
+                end
+                prof.expansionSkills = #kept > 0 and kept or nil -- empty list (Fishing/Cooking), same as none
+            end
+        end
+        if type(entry.assignments) == "table" then
+            entry.assignments.sentinel = nil -- removed role
+        end
+    end
+    -- Migration: per-character settings moved from AceDB's "Name - Realm" char
+    -- records onto the GUID-keyed registry entry. The entry was already synced from
+    -- the char record on every login and Sidecar edits wrote both, so the entry is
+    -- never older; only fill settings it lacks. Then drop the char records and
+    -- profileKeys (no profiles are used; AceDB re-adds one line per login).
+    local charRecords = rawget(EmpireManagerDB, "char")
+    if charRecords then
+        local SETTINGS = {
+            "assignments", "storageNote", "sortOrder", "auctioneerKeepBOE", "enchanterKeepDE",
+            "keepOwnProfMatsInBank", "keepOwnProfMatsInBags", "keepOwnProfMatsInBagsLatestOnly",
+            "stashOldQuestItems", "ignoreStorageRules", "goldLow", "goldHigh",
+        }
+        for _, entry in pairs(registry) do
+            local charData = entry.name and entry.realm and charRecords[entry.name .. " - " .. entry.realm]
+            if type(charData) == "table" then
+                for _, key in ipairs(SETTINGS) do
+                    if entry[key] == nil and charData[key] ~= nil then
+                        entry[key] = charData[key]
+                    end
+                end
+                if type(entry.assignments) == "table" then
+                    entry.assignments.sentinel = nil -- removed role
+                end
+            end
+        end
+        EmpireManagerDB.char = nil
+    end
+    for _, entry in pairs(registry) do
+        entry.dirtyFromSidecar = nil -- char/registry sync flag, gone with the char records
+    end
+    EmpireManagerDB.profileKeys = nil
+
     -- Backfill asn.realm on guild-bank rules created before the realm-aware
     -- composite key existed. Look up the first registry character in that
     -- guild and use the guild's home realm. If no such character exists, leave
@@ -245,6 +312,17 @@ function EmpireManager:OnInitialize()
         for k in pairs(gb) do
             if not validKeys[k] then
                 gb[k] = nil
+            end
+        end
+    end
+
+    -- Drop orphan cap.charbank entries: GUIDs no longer in the registry (purged or
+    -- deleted characters). Nothing reads a snapshot without its registry entry.
+    if self.db.global.storageCapacity and self.db.global.storageCapacity.charbank then
+        local cb = self.db.global.storageCapacity.charbank
+        for guid in pairs(cb) do
+            if not registry[guid] then
+                cb[guid] = nil
             end
         end
     end
@@ -852,55 +930,9 @@ function EmpireManager:OnEnable()
     -- Snapshot professions
     self:SnapshotProfessions(entry)
 
-    -- Sync char-level settings to global registry so the dashboard can read all alts.
-    -- If another character edited this entry via the sidecar (dirtyFromSidecar flag),
-    -- copy global→char instead of char→global to preserve those remote edits.
-    if entry.dirtyFromSidecar then
-        self.db.char.assignments = entry.assignments or self.db.char.assignments
-        self.db.char.storageNote = entry.storageNote or self.db.char.storageNote
-        self.db.char.sortOrder = entry.sortOrder or self.db.char.sortOrder
-        if entry.auctioneerKeepBOE ~= nil then
-            self.db.char.auctioneerKeepBOE = entry.auctioneerKeepBOE
-        end
-        if entry.enchanterKeepDE ~= nil then
-            self.db.char.enchanterKeepDE = entry.enchanterKeepDE
-        end
-        if entry.keepOwnProfMatsInBank ~= nil then
-            self.db.char.keepOwnProfMatsInBank = entry.keepOwnProfMatsInBank
-        end
-        if entry.keepOwnProfMatsInBags ~= nil then
-            self.db.char.keepOwnProfMatsInBags = entry.keepOwnProfMatsInBags
-        end
-        if entry.keepOwnProfMatsInBagsLatestOnly ~= nil then
-            self.db.char.keepOwnProfMatsInBagsLatestOnly = entry.keepOwnProfMatsInBagsLatestOnly
-        end
-        if entry.stashOldQuestItems ~= nil then
-            self.db.char.stashOldQuestItems = entry.stashOldQuestItems
-        end
-        if entry.ignoreStorageRules ~= nil then
-            self.db.char.ignoreStorageRules = entry.ignoreStorageRules
-        end
-        if entry.goldLow ~= nil then
-            self.db.char.goldLow = entry.goldLow
-        end
-        if entry.goldHigh ~= nil then
-            self.db.char.goldHigh = entry.goldHigh
-        end
-        entry.dirtyFromSidecar = nil
-    else
-        entry.assignments = self.db.char.assignments
-        entry.storageNote = self.db.char.storageNote
-        entry.sortOrder = self.db.char.sortOrder
-        entry.auctioneerKeepBOE = self.db.char.auctioneerKeepBOE
-        entry.enchanterKeepDE = self.db.char.enchanterKeepDE
-        entry.keepOwnProfMatsInBank = self.db.char.keepOwnProfMatsInBank
-        entry.keepOwnProfMatsInBags = self.db.char.keepOwnProfMatsInBags
-        entry.keepOwnProfMatsInBagsLatestOnly = self.db.char.keepOwnProfMatsInBagsLatestOnly
-        entry.stashOldQuestItems = self.db.char.stashOldQuestItems
-        entry.ignoreStorageRules = self.db.char.ignoreStorageRules
-        entry.goldLow = self.db.char.goldLow
-        entry.goldHigh = self.db.char.goldHigh
-    end
+    -- Per-character settings live on the registry entry (see DB_DEFAULTS); the
+    -- Sidecar edits it directly for any character, so there is nothing to sync.
+    entry.assignments = entry.assignments or {}
 
     -- Lazy trigger events (only the windows we care about)
     self:RegisterEvent("BAG_UPDATE_DELAYED")
@@ -1014,235 +1046,7 @@ function EmpireManager:SlashHandler(input)
             self:ChatMsg("  all . . . . . everything above", true)
         end
     elseif cmd == "inspect" then
-        -- Print classID/subClassID of the item currently under the cursor tooltip
-        GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
-        local _, itemLink = GameTooltip:GetItem()
-        GameTooltip:Hide()
-        if not itemLink then
-            -- Cursor fallback. GetCursorInfo returns a bare itemID, and
-            -- GetItemInfo(itemID) hands back the GENERIC template link - no bonusIDs,
-            -- no upgrade level - which reports different bindType/ilvl than the item
-            -- actually in the bag. Prefer the real link from the first bag slot
-            -- holding this itemID; fall back to the template only if it is not in bags.
-            local infoType, id = GetCursorInfo()
-            if infoType == "item" and id then
-                for bag = 0, 5 do
-                    for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
-                        local info = C_Container.GetContainerItemInfo(bag, slot)
-                        if info and info.itemID == id and info.hyperlink then
-                            itemLink = info.hyperlink
-                            break
-                        end
-                    end
-                    if itemLink then
-                        break
-                    end
-                end
-                itemLink = itemLink or select(2, C_Item.GetItemInfo(id))
-            end
-        end
-        if not itemLink then
-            self:ChatMsg("Pick up an item, then run /em inspect", true)
-            return
-        end
-        self:EnsureStorageCache()
-        local itemID, _, _, itemEquipLoc, icon, classID, subClassID = C_Item.GetItemInfoInstant(itemLink)
-        local itemName, _, _, _, _, _, _, maxStack, _, _, _, _, _, bindType, expansionID =
-            C_Item.GetItemInfo(itemLink)
-        self:ChatMsg(string.format("|cffffcc00[Inspect]|r %s", itemName or itemLink), true)
-        self:ChatMsgRaw(
-            string.format(
-                "  itemID=%d  classID=%d  subClassID=%d  equipLoc=%s",
-                itemID or 0,
-                classID or -1,
-                subClassID or -1,
-                itemEquipLoc or ""
-            ),
-            true
-        )
-        self:ChatMsgRaw(
-            string.format(
-                -- From the resolved link. Per-bag-slot lines below carry each instance's
-                -- own values; they can differ from this one (upgrade level, bonusIDs).
-                -- bindType is the item's DECLARED bind rule, not its current state: a
-                -- Warbound-until-equipped piece keeps bindType=2 after being equipped.
-                -- Classification trusts isBound/isWarbound, never bindType alone.
-                "  bindType=%d  expansionID=%s  icon=%s  maxStack=%s",
-                bindType or -1,
-                tostring(expansionID or "nil"),
-                tostring(icon or "nil"),
-                tostring(maxStack or "nil")
-            ),
-            true
-        )
-        -- Crafting quality tier (what the Restock chevron uses). Print both API
-        -- returns plus the atlas the addon resolves, so we can tell whether a wrong
-        -- chevron is a tier-number issue or an atlas-art issue.
-        do
-            local reagentQ = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
-                and C_TradeSkillUI.GetItemReagentQualityByItemInfo(itemID)
-            local craftedQ = C_TradeSkillUI and C_TradeSkillUI.GetItemCraftedQualityByItemInfo
-                and C_TradeSkillUI.GetItemCraftedQualityByItemInfo(itemLink)
-            local tier = reagentQ or craftedQ
-            local atlas = "nil"
-            if tier then
-                for _, cand in ipairs({
-                    "Professions-Icon-Quality-Tier" .. tier .. "-Small",
-                    "Professions-Icon-Quality-Tier" .. tier,
-                    "Professions-ChatIcon-Quality-Tier" .. tier,
-                }) do
-                    if C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(cand) then
-                        atlas = cand
-                        break
-                    end
-                end
-            end
-            self:ChatMsgRaw(
-                string.format(
-                    "  quality: reagentTier=%s  craftedTier=%s  -> atlas=%s",
-                    tostring(reagentQ or "nil"),
-                    tostring(craftedQ or "nil"),
-                    atlas
-                ),
-                true
-            )
-        end
-        -- Bind flags via the classifier's OWN parser, so this line cannot disagree
-        -- with what routing acted on. Also reports NeedsTooltipScan: when that gate
-        -- is false the classifier never parses at all and every flag stays false,
-        -- which a bare "isWarbound=false" would otherwise hide.
-        if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
-            local td = C_TooltipInfo.GetHyperlink(itemLink)
-            local isWarbound, isSoulbound, _, _, _, isConjured, isEquipToken, isKnownAppearance, isPermanentWarbound =
-                self.ParseTooltipBind(td)
-            local gate = self.NeedsTooltipScan(classID or -1, bindType or 0, itemID)
-            self:ChatMsgRaw(
-                string.format(
-                    "  tooltip: isWarbound=%s  permanentWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s  isKnownAppearance=%s",
-                    tostring(isWarbound),
-                    tostring(isPermanentWarbound),
-                    tostring(isSoulbound),
-                    tostring(isConjured),
-                    tostring(isEquipToken),
-                    tostring(isKnownAppearance)
-                ),
-                true
-            )
-            self:ChatMsgRaw(
-                string.format(
-                    "  NeedsTooltipScan=%s%s",
-                    tostring(gate),
-                    gate and "" or "  (classifier skips bind detection: all flags forced false)"
-                ),
-                true
-            )
-        end
-        -- Live per-slot bind state. The block above reads the item template, which
-        -- always says "Binds when picked up"; triage scans bags with GetBagItem.
-        if itemID and C_TooltipInfo and C_TooltipInfo.GetBagItem then
-            local found = 0
-            for bag = 0, 5 do
-                local numSlots = C_Container.GetContainerNumSlots(bag) or 0
-                for slot = 1, numSlots do
-                    local info = C_Container.GetContainerItemInfo(bag, slot)
-                    if info and info.itemID == itemID then
-                        found = found + 1
-                        -- Run the classifier's own parser on THIS slot's tooltip.
-                        -- Previously this listed tooltip lines matching a local
-                        -- whitelist, which was narrower than the parser's: a bind
-                        -- line the whitelist lacked printed as "(none)" even though
-                        -- the parser recognised it.
-                        local td = C_TooltipInfo.GetBagItem(bag, slot)
-                        local sWarbound, sSoulbound, _, _, _, _, _, _, sPermWarbound =
-                            self.ParseTooltipBind(td)
-                        -- Per-slot iLvl from that slot's own link: two upgraded copies
-                        -- of one itemID differ here, which is what splits them across
-                        -- the vendor ceiling (one kept, one flagged by Pawn).
-                        local slotLink = C_Container.GetContainerItemLink(bag, slot)
-                        local slotIlvl = slotLink and C_Item.GetDetailedItemLevelInfo(slotLink)
-                        -- bindType read from THIS slot's link, so two upgraded copies (or
-                        -- a generic template link) can be told apart from the header line.
-                        local slotBind = slotLink and select(14, C_Item.GetItemInfo(slotLink))
-                        -- isBound is the live per-instance check classification relies on
-                        -- (see the C_Item.IsBound note in TriageLogic's bag scan). Printing
-                        -- it beside bindType shows why a bindType=2 item is not AH-routed.
-                        local sloc = ItemLocation:CreateFromBagAndSlot(bag, slot)
-                        local slotBound = C_Item.DoesItemExist(sloc) and C_Item.IsBound(sloc)
-                        -- Stack size of THIS slot. Read beside maxStack on the header
-                        -- line, it gives the room a deposit into this slot would have.
-                        local slotInfo = C_Container.GetContainerItemInfo(bag, slot)
-                        local slotCount = slotInfo and slotInfo.stackCount
-                        self:ChatMsgRaw(
-                            string.format(
-                                "  bag %d:%d count=%s  ilvl=%s  bindType=%s  isBound=%s  parsed: warbound=%s permanent=%s soulbound=%s",
-                                bag,
-                                slot,
-                                tostring(slotCount or "?"),
-                                tostring(slotIlvl or "?"),
-                                tostring(slotBind or "?"),
-                                tostring(slotBound and true or false),
-                                tostring(sWarbound),
-                                tostring(sPermWarbound),
-                                tostring(sSoulbound)
-                            ),
-                            true
-                        )
-                    end
-                end
-            end
-            if found == 0 then
-                self:ChatMsgRaw("  (not in bags - live bind state unavailable)", true)
-            end
-        end
-        -- Vendor-gate context: the iLvl ceiling is the rule that most often explains
-        -- why one copy of an item is kept and another is flagged for vendor.
-        do
-            local ceiling = self.db.global.options.vendorIlvlCeiling or 0
-            self:ChatMsgRaw(
-                string.format(
-                    "  vendorIlvlCeiling=%s  pawnVendorBop=%s  vendorBopIlvl=%s",
-                    ceiling > 0 and tostring(ceiling) or "0 (disabled)",
-                    tostring(self.db.global.options.pawnVendorBop and true or false),
-                    tostring(self.db.global.options.vendorBopIlvl and true or false)
-                ),
-                true
-            )
-        end
-        -- Check profMatchCache
-        local cacheKey = (classID or 0) * 1000 + (subClassID or 0)
-        local matched = self._profMatchCache[cacheKey]
-        if matched then
-            local keys = {}
-            for k in pairs(matched) do
-                keys[#keys + 1] = k
-            end
-            self:ChatMsgRaw(string.format("  profMatchCache[%d] = {%s}", cacheKey, table.concat(keys, ", ")), true)
-        else
-            self:ChatMsgRaw(string.format("  profMatchCache[%d] = nil (no category match)", cacheKey), true)
-        end
-        local override = itemID and self._profOverrideCache[itemID]
-        if override then
-            local keys = {}
-            for k in pairs(override) do
-                keys[#keys + 1] = k
-            end
-            self:ChatMsgRaw(string.format("  profOverrideCache[%d] = {%s}", itemID, table.concat(keys, ", ")), true)
-        end
-        -- TSM prices (if available)
-        if TSM_API then
-            local de = self:GetTSMPrice(itemLink, "DBDisenchant")
-            local mk = self:GetTSMPrice(itemLink, "DBMarket")
-            self:ChatMsgRaw(
-                string.format(
-                    "  TSM DBDisenchant=%s  DBMarket=%s",
-                    de and self:FormatGold(de) or "nil",
-                    mk and self:FormatGold(mk) or "nil"
-                ),
-                true
-            )
-        else
-            self:ChatMsgRaw("  TSM not loaded (no DBDisenchant/DBMarket)", true)
-        end
+        self:_InspectItem()
     elseif cmd == "dump" then
         local _, sub = self:GetArgs(input, 2)
         sub = sub and sub:lower() or "bags"
@@ -1326,6 +1130,258 @@ function EmpireManager:UpdateEscBehavior()
         if StaticPopupDialogs[key] then
             StaticPopupDialogs[key].hideOnEscape = enabled
         end
+    end
+end
+
+-- Resolve the item `/em inspect` should report on: the tooltip's item first, then
+-- the cursor. GetCursorInfo returns a bare itemID, and GetItemInfo(itemID) hands
+-- back the GENERIC template link - no bonusIDs, no upgrade level - which reports
+-- different bindType/ilvl than the item actually in the bag. Prefer the real link
+-- from the first bag slot holding this itemID; fall back to the template only if
+-- it is not in bags.
+local function ResolveInspectLink()
+    GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+    local _, itemLink = GameTooltip:GetItem()
+    GameTooltip:Hide()
+    if itemLink then
+        return itemLink
+    end
+    local infoType, id = GetCursorInfo()
+    if infoType ~= "item" or not id then
+        return nil
+    end
+    for bag = 0, 5 do
+        for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
+            local info = C_Container.GetContainerItemInfo(bag, slot)
+            if info and info.itemID == id and info.hyperlink then
+                return info.hyperlink
+            end
+        end
+    end
+    return (select(2, C_Item.GetItemInfo(id)))
+end
+
+-- Profession match set as a stable "a, b, c" string. Sorted because `pairs` order
+-- varies between runs, which made two inspects of the same item look different.
+local function MatchSetKeys(set)
+    local keys = {}
+    for k in pairs(set) do
+        keys[#keys + 1] = k
+    end
+    table.sort(keys)
+    return table.concat(keys, ", ")
+end
+
+-- The crafting quality tier the Restock chevron uses, plus the atlas the addon
+-- resolves for it, so a wrong chevron can be pinned on the tier number or the art.
+local function InspectQualityTier(itemID, itemLink)
+    local reagentQ = C_TradeSkillUI
+        and C_TradeSkillUI.GetItemReagentQualityByItemInfo
+        and C_TradeSkillUI.GetItemReagentQualityByItemInfo(itemID)
+    local craftedQ = C_TradeSkillUI
+        and C_TradeSkillUI.GetItemCraftedQualityByItemInfo
+        and C_TradeSkillUI.GetItemCraftedQualityByItemInfo(itemLink)
+    local tier = reagentQ or craftedQ
+    local atlas = "nil"
+    if tier then
+        for _, cand in ipairs({
+            "Professions-Icon-Quality-Tier" .. tier .. "-Small",
+            "Professions-Icon-Quality-Tier" .. tier,
+            "Professions-ChatIcon-Quality-Tier" .. tier,
+        }) do
+            if C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(cand) then
+                atlas = cand
+                break
+            end
+        end
+    end
+    return reagentQ, craftedQ, atlas
+end
+
+-- Dev helper (`/em inspect`): report every value classification reads for the item
+-- under the cursor - class/subclass, the bind flags from the classifier's OWN
+-- parser, live per-slot state, the vendor gate, profession match and TSM prices.
+-- Dev-only; not surfaced in /em help.
+function EmpireManager:_InspectItem()
+    local itemLink = ResolveInspectLink()
+    if not itemLink then
+        self:ChatMsg("Pick up an item, then run /em inspect", true)
+        return
+    end
+    local function out(fmt, ...)
+        self:ChatMsgRaw(string.format(fmt, ...), true)
+    end
+    self:EnsureStorageCache()
+
+    local itemID, _, _, itemEquipLoc, icon, classID, subClassID = C_Item.GetItemInfoInstant(itemLink)
+    local itemName, _, _, _, _, _, _, maxStack, _, _, _, _, _, bindType, expansionID = C_Item.GetItemInfo(itemLink)
+    self:ChatMsg(string.format("|cffffcc00[Inspect]|r %s", itemName or itemLink), true)
+    out(
+        "  itemID=%d  classID=%d  subClassID=%d  equipLoc=%s",
+        itemID or 0,
+        classID or -1,
+        subClassID or -1,
+        itemEquipLoc or ""
+    )
+    -- From the resolved link. Per-bag-slot lines below carry each instance's own
+    -- values; they can differ from this one (upgrade level, bonusIDs). bindType is
+    -- the item's DECLARED bind rule, not its current state: a Warbound-until-equipped
+    -- piece keeps bindType=2 after being equipped. Classification trusts
+    -- isBound/isWarbound, never bindType alone.
+    out(
+        "  bindType=%d  expansionID=%s  icon=%s  maxStack=%s",
+        bindType or -1,
+        tostring(expansionID or "nil"),
+        tostring(icon or "nil"),
+        tostring(maxStack or "nil")
+    )
+    local reagentQ, craftedQ, atlas = InspectQualityTier(itemID, itemLink)
+    out(
+        "  quality: reagentTier=%s  craftedTier=%s  -> atlas=%s",
+        tostring(reagentQ or "nil"),
+        tostring(craftedQ or "nil"),
+        atlas
+    )
+
+    -- Bind flags via the classifier's OWN parser, so these lines cannot disagree
+    -- with what routing acted on. Also reports NeedsTooltipScan: when that gate is
+    -- false the classifier never parses at all and every flag stays false, which a
+    -- bare "isWarbound=false" would otherwise hide.
+    if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
+        local td = C_TooltipInfo.GetHyperlink(itemLink)
+        local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnown, isPermWarbound =
+            self.ParseTooltipBind(td)
+        out(
+            "  tooltip: isWarbound=%s  permanentWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s  isKnownAppearance=%s",
+            tostring(isWarbound),
+            tostring(isPermWarbound),
+            tostring(isSoulbound),
+            tostring(isConjured),
+            tostring(isEquipToken),
+            tostring(isKnown)
+        )
+        -- isTeleport gates a Keep that outranks the vendor whitelist, and
+        -- isLockbox/isUnique steer their own rules, but none of the three were
+        -- printed - so a false hit on any of them was invisible here.
+        out(
+            "  tooltip: isTeleport=%s  isLockbox=%s  isUnique=%s",
+            tostring(isTeleport),
+            tostring(isLockbox),
+            tostring(isUnique)
+        )
+        local gate = self.NeedsTooltipScan(classID or -1, bindType or 0, itemID)
+        out(
+            "  NeedsTooltipScan=%s%s",
+            tostring(gate),
+            gate and "" or "  (classifier skips bind detection: all flags forced false)"
+        )
+    end
+
+    -- Live per-slot state. The block above reads the item template, which always
+    -- says "Binds when picked up"; triage scans bags with GetBagItem.
+    if itemID and C_TooltipInfo and C_TooltipInfo.GetBagItem then
+        local found = 0
+        for bag = 0, 5 do
+            for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
+                local info = C_Container.GetContainerItemInfo(bag, slot)
+                if info and info.itemID == itemID then
+                    found = found + 1
+                    -- Run the classifier's own parser on THIS slot's tooltip.
+                    local td = C_TooltipInfo.GetBagItem(bag, slot)
+                    local sWarbound, sSoulbound, sLockbox, sUnique, sTeleport, sConjured, sEquipToken, sKnown, sPermWarbound =
+                        self.ParseTooltipBind(td)
+                    -- Per-slot iLvl and bindType from that slot's own link: two
+                    -- upgraded copies of one itemID report their own values, and that
+                    -- difference is what splits them across the vendor ceiling.
+                    local slotLink = info.hyperlink or C_Container.GetContainerItemLink(bag, slot)
+                    local slotIlvl = slotLink and C_Item.GetDetailedItemLevelInfo(slotLink)
+                    local slotBind = slotLink and select(14, C_Item.GetItemInfo(slotLink))
+                    -- isBound is the live per-instance check classification relies on
+                    -- (see the C_Item.IsBound note in TriageLogic's bag scan). Printing
+                    -- it beside bindType shows why a bindType=2 item is not AH-routed.
+                    local sloc = ItemLocation:CreateFromBagAndSlot(bag, slot)
+                    local slotBound = C_Item.DoesItemExist(sloc) and C_Item.IsBound(sloc)
+                    out(
+                        "  bag %d:%d count=%s  ilvl=%s  bindType=%s  isBound=%s  parsed: warbound=%s permanent=%s soulbound=%s",
+                        bag,
+                        slot,
+                        tostring(info.stackCount or "?"),
+                        tostring(slotIlvl or "?"),
+                        tostring(slotBind or "?"),
+                        tostring(slotBound and true or false),
+                        tostring(sWarbound),
+                        tostring(sPermWarbound),
+                        tostring(sSoulbound)
+                    )
+                    -- The header block above parses GetHyperlink; the bag scan parses
+                    -- GetBagItem. The two can disagree (a bag tooltip carries live
+                    -- per-slot state the template link lacks), and only this one
+                    -- matches what routing acted on.
+                    out(
+                        "    flags: teleport=%s lockbox=%s unique=%s equipToken=%s known=%s conjured=%s",
+                        tostring(sTeleport),
+                        tostring(sLockbox),
+                        tostring(sUnique),
+                        tostring(sEquipToken),
+                        tostring(sKnown),
+                        tostring(sConjured)
+                    )
+                    -- Raw lines for the FIRST matching slot only. Every flag above is
+                    -- derived from a single tooltip row, so when one reads wrong the
+                    -- only way to see WHY is the text the parser walked.
+                    local lines = found == 1 and td and td.lines
+                    if lines and #lines > 0 then
+                        out("    tooltip lines (GetBagItem):")
+                        for i = 1, math.min(#lines, 30) do
+                            out("      [%d] %s", i, lines[i] and lines[i].leftText or "(nil)")
+                        end
+                        if #lines > 30 then
+                            out("      ... %d more lines", #lines - 30)
+                        end
+                    elseif found == 1 then
+                        out("    tooltip lines (GetBagItem): (none returned)")
+                    end
+                end
+            end
+        end
+        if found == 0 then
+            out("  (not in bags - live bind state unavailable)")
+        end
+    end
+
+    -- Vendor-gate context: the iLvl ceiling is the rule that most often explains why
+    -- one copy of an item is kept and another is flagged for vendor.
+    local options = self.db.global.options
+    local ceiling = options.vendorIlvlCeiling or 0
+    out(
+        "  vendorIlvlCeiling=%s  pawnVendorBop=%s  vendorBopIlvl=%s",
+        ceiling > 0 and tostring(ceiling) or "0 (disabled)",
+        tostring(options.pawnVendorBop and true or false),
+        tostring(options.vendorBopIlvl and true or false)
+    )
+
+    local cacheKey = (classID or 0) * 1000 + (subClassID or 0)
+    local matched = self._profMatchCache[cacheKey]
+    if matched then
+        out("  profMatchCache[%d] = {%s}", cacheKey, MatchSetKeys(matched))
+    else
+        out("  profMatchCache[%d] = nil (no category match)", cacheKey)
+    end
+    local override = itemID and self._profOverrideCache[itemID]
+    if override then
+        out("  profOverrideCache[%d] = {%s}", itemID, MatchSetKeys(override))
+    end
+
+    if TSM_API then
+        local de = self:GetTSMPrice(itemLink, "DBDisenchant")
+        local mk = self:GetTSMPrice(itemLink, "DBMarket")
+        out(
+            "  TSM DBDisenchant=%s  DBMarket=%s",
+            de and self:FormatGold(de) or "nil",
+            mk and self:FormatGold(mk) or "nil"
+        )
+    else
+        out("  TSM not loaded (no DBDisenchant/DBMarket)")
     end
 end
 
@@ -2043,11 +2099,12 @@ function EmpireManager:RefreshAfterProfessionChange(guid)
 end
 
 -- Decide whether the current character's bag gold is outside its Withdraw/Deposit
--- amounts (per-character, db.char). Returns "deposit"|"withdraw", amount (copper),
+-- amounts (per-character, on its registry entry). Returns "deposit"|"withdraw", amount (copper),
 -- or nil when nothing is needed. Withdraw is capped by what the warband pool holds.
 function EmpireManager:ComputeWarbandGoldTransfer()
-    local low = self.db.char.goldLow or 0
-    local high = self.db.char.goldHigh or 0
+    local entry = self.playerGUID and self.db.global.registry[self.playerGUID] or {}
+    local low = entry.goldLow or 0
+    local high = entry.goldHigh or 0
     if low <= 0 and high <= 0 then
         return nil
     end
@@ -3004,12 +3061,11 @@ function EmpireManager:PLAYER_LOGOUT()
     end
 end
 
-function EmpireManager:TIME_PLAYED_MSG(_, totalTime, levelTime)
+function EmpireManager:TIME_PLAYED_MSG(_, totalTime)
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
     if entry then
         entry.playedTotal = totalTime -- seconds
-        entry.playedLevel = levelTime -- seconds
     end
     -- Re-register TIME_PLAYED_MSG on chat frames we silenced for this request.
     self:RestoreTimePlayedChatFrames()
@@ -3149,8 +3205,10 @@ function EmpireManager:SnapshotExpansionSkills(entry)
     -- profession/professionID/professionName/expansionName/skillLevel/...). An
     -- earlier version gated rows on `info.expansionID >= 0`, which is always nil,
     -- so EVERY row was dropped and expansionSkills stayed empty on all locales.
-    -- Resolve the ID from the localized expansionName instead, and keep the row
-    -- even when the name is unknown (displayed under its raw name, sorted last).
+    -- Resolve the ID from the tier's skill line (same number on every client
+    -- language), falling back to the localized expansionName. Rows are stored as
+    -- { expansionID, skill, maxSkill } only; a tier neither lookup knows (a new
+    -- expansion before its lines are added) is skipped rather than stored unlabeled.
     --
     -- `GetAllProfessionTradeSkillLines` returns lines for every profession the
     -- character knows, most with maxSkillLevel 0, so filter on maxSkillLevel > 0.
@@ -3167,17 +3225,12 @@ function EmpireManager:SnapshotExpansionSkills(entry)
         -- is not an expansion tier and would render as an "Unknown" row.
         local isTierLine = info and info.parentProfessionID ~= nil
         if info and sameProf and isTierLine and info.skillLevel and info.maxSkillLevel and info.maxSkillLevel > 0 then
-            local expName = info.expansionName
-            local expID = self:ExpansionIDFromAPIName(expName)
-            -- Dedupe by ID when known (parent + child lines share an expansion),
-            -- else by name so an unmapped locale still collapses duplicates.
-            local key = expID or ("name:" .. tostring(expName or lineID):lower())
-            local existing = byExpKey[key]
-            if not existing or info.skillLevel > existing.skill then
-                byExpKey[key] = {
-                    skillLineID = lineID,
+            local expID = self.EXPANSION_ID_BY_TIER_LINE[lineID] or self:ExpansionIDFromAPIName(info.expansionName)
+            -- Dedupe by ID (parent + child lines share an expansion).
+            local existing = expID and byExpKey[expID]
+            if expID and (not existing or info.skillLevel > existing.skill) then
+                byExpKey[expID] = {
                     expansionID = expID,
-                    expansionName = expName,
                     skill = info.skillLevel,
                     maxSkill = info.maxSkillLevel,
                 }
@@ -3189,15 +3242,11 @@ function EmpireManager:SnapshotExpansionSkills(entry)
     for _, e in pairs(byExpKey) do
         expSkills[#expSkills + 1] = e
     end
-    -- Unknown expansions (nil ID) sort last rather than colliding at 999.
     table.sort(expSkills, function(a, b)
-        local ai, bi = a.expansionID or 998, b.expansionID or 998
-        if ai ~= bi then
-            return ai < bi
-        end
-        return (a.expansionName or "") < (b.expansionName or "")
+        return a.expansionID < b.expansionID
     end)
-    profEntry.expansionSkills = expSkills
+    -- Fishing/Cooking report no expansion tiers; store nil, not an empty table.
+    profEntry.expansionSkills = #expSkills > 0 and expSkills or nil
 
     -- Promote newest expansion skill to the top-level skill/maxSkill so UI shows
     -- e.g. 6/105 instead of the overall tier rank (1/100) from GetProfessionInfo.
@@ -3285,6 +3334,16 @@ StaticPopupDialogs["EM_GOLD_TRANSFER_CONFIRM"] = {
     hideOnEscape = true,
     preferredIndex = 3,
 }
+
+-- The transfer needs the Warband Bank open, so drop the prompt when the player
+-- walks away. Own receiver id: AceEvent keeps one handler per (receiver, message),
+-- and Triage.lua already owns EmpireManager's EM_BANK_CLOSED handler. The message
+-- also fires on guild bank close, hence the bankIsOpen check.
+EmpireManager.RegisterMessage("EmpireManager_GoldTransfer", "EM_BANK_CLOSED", function()
+    if not EmpireManager.bankIsOpen then
+        StaticPopup_Hide("EM_GOLD_TRANSFER_CONFIRM")
+    end
+end)
 
 function EmpireManager:ConfirmWipe(target)
     local text
@@ -3757,7 +3816,6 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                                                 end
                                                 expSkills[#expSkills + 1] = {
                                                     expansionID = expID,
-                                                    expansionName = tName,
                                                     skill = tSkillN,
                                                     maxSkill = tMaxN,
                                                 }
@@ -3851,7 +3909,6 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                             spec = spec,
                             professions = #profs > 0 and profs or nil,
                             lastSeen = 0,
-                            _stub = true, -- marks as API-seeded, not yet in-game confirmed
                         }
                         self.db.global.registry[stubGUID] = entry
                         if sortOrder then
@@ -3896,6 +3953,10 @@ function EmpireManager:PurgeByGUID(guid)
     end
 
     self.db.global.registry[guid] = nil
+    local cap = self.db.global.storageCapacity
+    if cap and cap.charbank then
+        cap.charbank[guid] = nil
+    end
     if not self.db.global.charBlacklist then
         self.db.global.charBlacklist = {}
     end

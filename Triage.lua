@@ -1726,6 +1726,45 @@ function EmpireManager:RefreshTriageDisplay(forceRescan, silent)
     end)
 end
 
+-- Invalidate the cached bag scan and repaint the bags tab WITHOUT releasing the
+-- bulk lock. The mail flow holds that lock for the whole multi-recipient run, and
+-- both refresh paths bail while it is set (RefreshTriageDisplay returns at the top,
+-- and the BAG_UPDATE_DELAYED debounce returns in the EM_TRIAGE_REFRESH handler), so
+-- rows for already-mailed recipients stayed on screen until the last one finished.
+-- The lock has to stay on: the action buttons must not become clickable mid-run.
+-- Skips the floor consolidation that RefreshTriageDisplay does - moving items around
+-- between recipients would invalidate the bag/slot coordinates the remaining sends
+-- still hold.
+function EmpireManager:_RefreshBagsDuringBulk()
+    self._bagsDirty = true
+    self.triageResults = nil
+    if not (self.triageFrame and self.triageFrame:IsShown()) then
+        return
+    end
+    if self._triageActiveTab ~= "bags" or self._triageConsolidating then
+        return
+    end
+    local savedOffset = 0
+    if self.triageFrame.ScrollFrame then
+        savedOffset = self.triageFrame.ScrollFrame:GetVerticalScroll() or 0
+    end
+    self:CancelAsyncScan()
+    self:RunTriageAsync(function(results)
+        if not self.triageFrame or not self.triageFrame:IsShown() then
+            return
+        end
+        if self._triageActiveTab ~= "bags" then
+            return
+        end
+        self:_BuildBagTriageUI(results, savedOffset)
+        -- _BuildBagTriageUI re-derives every action button from the new counts,
+        -- which would undo the lock while the run is still going.
+        if self._triageBulkOperating then
+            self:_SetAllTriageActionsLocked(true)
+        end
+    end)
+end
+
 -- Separated UI builder so it can be called from the async callback
 function EmpireManager:_BuildBagTriageUI(results, savedOffset)
     -- Filter out session-skipped rows/actions for display and counts.
@@ -3448,17 +3487,28 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         self:_SetAllTriageActionsLocked(false)
         if totalSent > 0 then
             self:ChatMsg(string.format("|cffffcc00[Triage]|r Mailed %d items", totalSent))
-            -- Drop the cache and rescan after the last send's bag update settles, so
-            -- the list reflects post-mail bags (not the stale pre-mail rows).
+        end
+        -- Drop the cache and rescan after the last send's bag update settles, so the
+        -- list reflects post-mail bags (not the stale pre-mail rows). Deliberately NOT
+        -- gated on totalSent: items leave the bags at attach time, so a batch that hit
+        -- the MAIL_TIMEOUT, came back MAIL_FAILED, or was cut short by Cancel can empty
+        -- slots while totalSent stays 0. Gating this left those runs showing pre-mail
+        -- rows, and the BAG_UPDATE_DELAYED refresh that would have caught it was
+        -- swallowed by the bulk-operating guard in EM_TRIAGE_REFRESH.
+        self._bagsDirty = true
+        self.triageResults = nil
+        C_Timer.After(0.5, function()
+            self._triageBulkOperating = false -- ensure the refresh isn't bailed
             self._bagsDirty = true
             self.triageResults = nil
-            C_Timer.After(0.5, function()
-                self._triageBulkOperating = false -- ensure the refresh isn't bailed
-                self._bagsDirty = true
-                self.triageResults = nil
+            -- Only repaint a visible overlay: RefreshTriageDisplay consolidates floor
+            -- stacks before scanning, and that moves items - not something to run off a
+            -- cancelled send against a hidden frame. The cache is already invalidated
+            -- above, so the next open rescans anyway.
+            if self.triageFrame and self.triageFrame:IsShown() then
                 self:RefreshTriageDisplay(true)
-            end)
-        end
+            end
+        end)
         CheckBagsFull()
     end
 
@@ -3633,6 +3683,10 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         self:UpdateMailBtnState()
         self:ExecuteMailForRecipient(recipient, items, function(sent)
             self._mailingSending = nil
+            -- Repaint between recipients. reportMailed only runs after the LAST one,
+            -- so without this the rows just mailed stayed on screen for the rest of
+            -- the run (every event-driven refresh is bailed by the bulk lock).
+            self:_RefreshBagsDuringBulk()
             self:ShowMailPerCharDialog(byRecipient, recipients, index + 1, totalSent + sent)
         end)
     end)

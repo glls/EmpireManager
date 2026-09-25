@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.7] - 2026-09-25
+
+### Fixed
+
+- **Renamed characters keep their settings.** Roles, notes, sort order, gold amounts and options used to reset after a rename. They now carry over, along with Storage Rules and bank data.
+- **Leaving a bank updates Triage again.** The Bank, Warband Bank and Guild Bank tabs grey out, Triage returns to Bags (or closes, if "Close on Leaving Bank/Vendor/Mail" is on), and a running Take Out, Reorganize or Deposit stops.
+- **Vendor All sells your best items last.** Items now sell in the order the Triage list shows, so your most valuable gear stays at the top of the vendor's Buyback tab if you need it back.
+- **The gold auto-balance prompt closes when you walk away from the Warband bank.** Before, it stayed open and clicking OK tried to move gold with the bank closed.
+- **Triage updates between mail recipients.** When Mail All Routable sends to several characters, items already mailed leave the list right away. The list also refreshes after a mail run that timed out, failed or was cancelled.
+- **The Import/Export window starts empty each time you open it.** The previous export or paste no longer stays in the text box.
+- **The Restock confirmation names the character bank it fills.**
+- **Double-clicking a character no longer highlights your logged-in character.** A row is highlighted only while its panel is open.
+
+### Changed
+
+- **Smaller saved data.** Data left over from removed features is cleaned up automatically, and profession data is stored more compactly. A 52-character roster went from 227 KB to 145 KB.
+- **Removing a character from the roster also deletes its saved bank data.**
+
 ## [1.2.6] - 2026-09-08
 
 ### Fixed

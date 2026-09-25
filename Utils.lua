@@ -227,6 +227,47 @@ EmpireManager.EXPANSION_API_NAME_TO_ID = {
     ["midnight"] = 11,
 }
 
+-- Profession tier skill line -> expansionID. The tier's skillLineID (ProfessionInfo
+-- .professionID) is the same number on every client language, so this resolves the
+-- expansion without the localized name. Captured from live /em dump data; add the
+-- 11 new lines each expansion. Missing lines fall back to EXPANSION_API_NAME_TO_ID.
+-- Blacksmithing Shadowlands is not captured yet (no character had that tier).
+EmpireManager.EXPANSION_ID_BY_TIER_LINE = {
+    -- Alchemy
+    [2485] = 0, [2484] = 1, [2483] = 2, [2482] = 3, [2481] = 4, [2480] = 5,
+    [2479] = 6, [2478] = 7, [2750] = 8, [2823] = 9, [2871] = 10, [2906] = 11,
+    -- Blacksmithing
+    [2477] = 0, [2476] = 1, [2475] = 2, [2474] = 3, [2473] = 4, [2472] = 5,
+    [2454] = 6, [2437] = 7, [2822] = 9, [2872] = 10, [2907] = 11,
+    -- Enchanting
+    [2494] = 0, [2493] = 1, [2492] = 2, [2491] = 3, [2489] = 4, [2488] = 5,
+    [2487] = 6, [2486] = 7, [2753] = 8, [2825] = 9, [2874] = 10, [2909] = 11,
+    -- Engineering
+    [2506] = 0, [2505] = 1, [2504] = 2, [2503] = 3, [2502] = 4, [2501] = 5,
+    [2500] = 6, [2499] = 7, [2755] = 8, [2827] = 9, [2875] = 10, [2910] = 11,
+    -- Herbalism
+    [2556] = 0, [2555] = 1, [2554] = 2, [2553] = 3, [2552] = 4, [2551] = 5,
+    [2550] = 6, [2549] = 7, [2760] = 8, [2832] = 9, [2877] = 10, [2912] = 11,
+    -- Inscription
+    [2514] = 0, [2513] = 1, [2512] = 2, [2511] = 3, [2510] = 4, [2509] = 5,
+    [2508] = 6, [2507] = 7, [2756] = 8, [2828] = 9, [2878] = 10, [2913] = 11,
+    -- Jewelcrafting
+    [2524] = 0, [2523] = 1, [2522] = 2, [2521] = 3, [2520] = 4, [2519] = 5,
+    [2518] = 6, [2517] = 7, [2757] = 8, [2829] = 9, [2879] = 10, [2914] = 11,
+    -- Leatherworking
+    [2532] = 0, [2531] = 1, [2530] = 2, [2529] = 3, [2528] = 4, [2527] = 5,
+    [2526] = 6, [2525] = 7, [2758] = 8, [2830] = 9, [2880] = 10, [2915] = 11,
+    -- Mining
+    [2572] = 0, [2571] = 1, [2570] = 2, [2569] = 3, [2568] = 4, [2567] = 5,
+    [2566] = 6, [2565] = 7, [2761] = 8, [2833] = 9, [2881] = 10, [2916] = 11,
+    -- Skinning
+    [2564] = 0, [2563] = 1, [2562] = 2, [2561] = 3, [2560] = 4, [2559] = 5,
+    [2558] = 6, [2557] = 7, [2762] = 8, [2834] = 9, [2882] = 10, [2917] = 11,
+    -- Tailoring
+    [2540] = 0, [2539] = 1, [2538] = 2, [2537] = 3, [2536] = 4, [2535] = 5,
+    [2534] = 6, [2533] = 7, [2759] = 8, [2831] = 9, [2883] = 10, [2918] = 11,
+}
+
 -- Returns an inline texture string for an expansion icon, cropped to its iconWidth
 function EmpireManager:ExpIconString(expInfo, yOffset)
     local w = expInfo.iconWidth or 44
@@ -1513,8 +1554,8 @@ end
 
 -- expansionName (from ProfessionInfo) -> numeric expansionID, or nil if unknown.
 -- Checks the English label/apiNames in EXPANSION_DISPLAY first, then the localized
--- table. ProfessionInfo has no expansionID field, so this name lookup is the only
--- way to order and dedupe per-expansion skill rows.
+-- table. ProfessionInfo has no expansionID field; the snapshot tries the
+-- locale-proof EXPANSION_ID_BY_TIER_LINE first and falls back to this name lookup.
 function EmpireManager:ExpansionIDFromAPIName(name)
     if type(name) ~= "string" or name == "" then
         return nil

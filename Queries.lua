@@ -243,7 +243,6 @@ EmpireManager.SORT_KEYS = {
 -------------------------------------------------------------------------------
 
 -- Resolve sort order conflicts: clear any other character using the same number.
--- Also marks displaced entries as dirtyFromSidecar so they sync on next login.
 -- Returns true if a conflict was found and resolved.
 function EmpireManager:ResolveSortConflict(guid, newSortOrder)
     if not newSortOrder or newSortOrder == 0 then
@@ -253,7 +252,6 @@ function EmpireManager:ResolveSortConflict(guid, newSortOrder)
     for otherGuid, otherEntry in pairs(self.db.global.registry) do
         if otherGuid ~= guid and otherEntry.sortOrder == newSortOrder then
             otherEntry.sortOrder = 0
-            otherEntry.dirtyFromSidecar = true
             resolved = true
         end
     end

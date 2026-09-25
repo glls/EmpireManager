@@ -911,11 +911,11 @@ function EmpireManager:RefreshVisibleRows()
     end)
 end
 
--- Which row the grid highlights. The Sidecar's character wins while it's open;
--- otherwise we fall back to the logged-in character so the grid always shows
--- "you are here" instead of nothing.
+-- Which row the grid highlights: the Sidecar's character, or none when it's closed.
+-- No fallback to the logged-in character: re-clicking a row closes its Sidecar, and a
+-- highlight jumping to another row then read as navigating away.
 function EmpireManager:GetSelectedGUID()
-    return self.sidecarGUID or self.playerGUID
+    return self.sidecarGUID
 end
 
 -- Repaint only the selection highlight on visible rows. Cheaper than

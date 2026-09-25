@@ -12,6 +12,8 @@ EmpireManager is a World of Warcraft addon built for players who want less busyw
 - **Bag Triage** - One button opens a categorized view of items you can act on: **Route** (mail to a banker), **Stash** (bank it), or **Vendor**. Mail, deposit, or vendor a category with one click.
 - **Roster Dashboard** - Spreadsheet-style view of your entire roster. Professions, gold, roles, item level - all sortable, all live.
 - **Storage Capacity** - See which banks are filling up before routing starts to break down.
+- **Bank Restock** - Keep a minimum of any item in a bank or in your bags; EmpireManager tops it up whenever you open a bank.
+- **Setup Wizard** - Create a starter set of storage rules from a template in a few clicks.
 - **Out of the Way** - EmpireManager stays quiet until you open a bag or bank, so it helps when you need it without feeling heavy.
 
 ### **[Quickstart](https://wow.cyberpunk.gr/quickstart/)** - Set up your roster and first routing rules

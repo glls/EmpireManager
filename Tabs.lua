@@ -2634,6 +2634,9 @@ end
 
 -- Return a numeric expansion order for an `expansionSkills` entry. Unknown names sort last.
 local function ExpansionOrder(expEntry, fallbackIndex)
+    if expEntry and expEntry.expansionID then
+        return expEntry.expansionID
+    end
     if not expEntry or not expEntry.expansionName then
         return 1000 + (fallbackIndex or 0)
     end
@@ -2877,7 +2880,8 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
                                     local lookup = exp.expansionName and EXPANSION_LOOKUP[exp.expansionName:lower()]
                                         or nil
                                     local id = exp.expansionID or (lookup and lookup.id)
-                                    local displayName = (lookup and lookup.label) or exp.expansionName
+                                    local byID = id and EXPANSION_ENTRY_BY_ID[id]
+                                    local displayName = (byID and byID.label) or (lookup and lookup.label) or exp.expansionName
                                     -- Drop rows older builds stored wrongly (base-profession
                                     -- aggregates in any locale). No DB migration needed.
                                     if EmpireManager:IsBogusExpansionSkillRow(exp) then
@@ -6895,6 +6899,14 @@ function EmpireManager:InitIOFrame()
     -- Status text (below edit box)
     local statusText = f.StatusFrame.StatusText
     statusText:SetText(" ")
+
+    -- Every close path (ESC, X, toggle) lands here, so a reopen starts empty.
+    -- A pending import is safe: EM_IMPORT_CONFIRM already holds the parsed sections.
+    f:HookScript("OnHide", function()
+        editBox:ClearFocus()
+        editBox:SetText("")
+        statusText:SetText(" ")
+    end)
 
     -- Bottom row: [ExportDD][Export]          [Auto-assign] [Import]
     -- Export type dropdown

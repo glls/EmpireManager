@@ -768,10 +768,13 @@ local function DestHeaderText(self, item)
         -- charbank rules are owner-only in the engine, so item.entry.chars must
         -- include the current player. Show that name for clarity.
         local myGuid = UnitGUID("player")
-        if item.entry and item.entry.chars and item.entry.chars[myGuid] then
-            local entry = self.db.global.registry[myGuid]
-            if entry and entry.name then
-                return string.format("To Character Bank (%s)", entry.name)
+        for _, g in ipairs(item.entry and item.entry.chars or {}) do
+            if g == myGuid then
+                local entry = self.db.global.registry[myGuid]
+                if entry and entry.name then
+                    return string.format("To Character Bank (%s)", entry.name)
+                end
+                break
             end
         end
         return "To Character Bank"
@@ -1061,7 +1064,10 @@ end
 -- shows became stale (destinations no longer reachable, dest counts frozen at
 -- open time). EM_BANK_CLOSED is sent by both BANKFRAME_CLOSED and guild-bank
 -- PLAYER_INTERACTION_MANAGER_FRAME_HIDE(type 10).
-EmpireManager:RegisterMessage("EM_BANK_CLOSED", function()
+-- Registered under its own id, not EmpireManager: AceEvent keeps one handler per
+-- (receiver, message), so EmpireManager:RegisterMessage here would replace
+-- Triage.lua's EM_BANK_CLOSED handler (tab greying, bulk abort, cache reset).
+EmpireManager.RegisterMessage("EmpireManager_Restock", "EM_BANK_CLOSED", function()
     local f = EmpireManagerRestockConfirmDialog
     if f and f:IsShown() then
         f:Hide()
