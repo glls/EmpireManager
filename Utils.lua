@@ -373,12 +373,16 @@ function EmpireManager:GuildKey(guildName, realm)
     if not realm or realm == "" then
         return nil
     end
-    -- Normalize realm: the same realm shows up with a space ("Steamwheedle Cartel"
-    -- via GetRealmName) and without ("SteamwheedleCartel" via GetNormalizedRealmName),
-    -- depending on which API the caller used. Collapse to one form so snapshot keys
-    -- and rule lookups always match.
-    realm = realm:gsub("%s+", "")
-    return guildName .. "-" .. realm
+    -- Normalize realm (see NormRealm): GetRealmName and GetNormalizedRealmName spell
+    -- the same realm differently, and callers mix the two. Collapse to one form so
+    -- snapshot keys and rule lookups always match.
+    return guildName .. "-" .. self:NormRealm(realm)
+end
+
+-- GuildKey as written before hyphens were stripped ("Guild-Azjol-Nerub"). Only for
+-- honouring blacklist entries saved in that form; never write new keys with it.
+local function LegacyGuildKey(guildName, realm)
+    return guildName .. "-" .. realm:gsub("%s+", "")
 end
 
 -- Is this (guild, realm) pair blacklisted?
@@ -401,18 +405,37 @@ function EmpireManager:IsGuildBlacklisted(guildName, realm)
         return true -- legacy bare-name entry
     end
     local key = self:GuildKey(guildName, realm)
-    return key ~= nil and bl[key] == true
+    if not key then
+        return false
+    end
+    return bl[key] == true or bl[LegacyGuildKey(guildName, realm)] == true
 end
 
--- Normalize a realm name for equality checks. The same realm shows up with a
--- space ("Steamwheedle Cartel" via GetRealmName) and without ("SteamwheedleCartel"
--- via GetNormalizedRealmName / rule storage), so any realm comparison that might
--- mix the two sources must normalize both sides. Matches GuildKey's normalization.
+-- Display label for a guild blacklist key: "Guild - Realm" when the key matches a
+-- guild in the registry, else the raw key. Realm names can contain "-"
+-- ("Azjol-Nerub") and a key can be the legacy spelling, so no string split.
+function EmpireManager:GuildBlacklistLabel(blKey)
+    for _, entry in pairs(self.db.global.registry) do
+        local g, r = entry.guild, entry.guildRealm
+        if g and g ~= "" and r and r ~= "" then
+            if blKey == self:GuildKey(g, r) or blKey == LegacyGuildKey(g, r) then
+                return g .. " - " .. r
+            end
+        end
+    end
+    return blKey
+end
+
+-- Normalize a realm name for equality checks. The same realm shows up in two
+-- spellings: GetRealmName keeps spaces and hyphens ("Steamwheedle Cartel",
+-- "Azjol-Nerub"), GetNormalizedRealmName and GetGuildInfo's realm drop both
+-- ("SteamwheedleCartel", "AzjolNerub", confirmed in-game). Any realm comparison
+-- that might mix the two sources must normalize both sides. GuildKey uses this.
 function EmpireManager:NormRealm(realm)
     if not realm or realm == "" then
         return ""
     end
-    return (realm:gsub("%s+", ""))
+    return (realm:gsub("[%s%-]+", ""))
 end
 
 -- Single source of truth for the About panel layout. Called from both the
@@ -1821,6 +1844,17 @@ function EmpireManager:ClassColoredName(entry)
         return color:WrapTextInColorCode(display)
     end
     return display
+end
+
+-- "Name-Realm" in class color, for tooltips where same-name alts must be told apart.
+function EmpireManager:ClassColoredNameRealm(entry)
+    local realm = entry.realm
+    if not realm or realm == "" then
+        return self:ClassColoredName(entry)
+    end
+    local text = (entry.name or "?") .. "-" .. realm
+    local color = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
+    return color and color:WrapTextInColorCode(text) or text
 end
 
 function EmpireManager:FormatRoles(assignments)

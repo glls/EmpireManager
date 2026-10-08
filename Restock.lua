@@ -243,7 +243,7 @@ local function EntryReachableNow(self, entry)
         if entry.guild ~= guildName then
             return false
         end
-        if entry.realm and guildRealm and entry.realm ~= guildRealm then
+        if entry.realm and guildRealm and EmpireManager:NormRealm(entry.realm) ~= EmpireManager:NormRealm(guildRealm) then
             return false
         end
         return true

@@ -3174,16 +3174,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
     local cap = EmpireManager.db.global.storageCapacity or {}
 
     local function CharBankLabel(charEntry)
-        local base = EmpireManager:ClassColoredName(charEntry)
-        local realm = charEntry.realm
-        if not realm or realm == "" then
-            return base
-        end
-        local color = RAID_CLASS_COLORS and RAID_CLASS_COLORS[charEntry.class]
-        if color then
-            return base .. color:WrapTextInColorCode(" - " .. realm)
-        end
-        return base .. " - " .. realm
+        return EmpireManager:ClassColoredNameRealm(charEntry)
     end
 
     -- Group assignments by bank destination
@@ -3200,7 +3191,9 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             if EmpireManager:IsGuildBlacklisted(guild, realm) then
                 bankKey = nil
             else
-                bankKey = "guildbank:" .. guild .. "\1" .. realm
+                -- NormRealm: rules and snapshots store the realm in either spelling
+                -- ("Steamwheedle Cartel" / "SteamwheedleCartel"); both must land on one row.
+                bankKey = "guildbank:" .. guild .. "\1" .. EmpireManager:NormRealm(realm)
                 bankLabel = guild .. " Guild Bank"
                 local key = EmpireManager:GuildKey(asn.guild, asn.realm)
                 capSection = key and cap.guildbank and cap.guildbank[key]
@@ -3259,7 +3252,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         local knownPairs = {}
         for _, entry in pairs(EmpireManager.db.global.registry or {}) do
             if entry.guild and entry.guild ~= "" and entry.guildRealm and entry.guildRealm ~= "" then
-                knownPairs[entry.guild .. "-" .. entry.guildRealm] = { entry.guild, entry.guildRealm }
+                knownPairs[EmpireManager:GuildKey(entry.guild, entry.guildRealm)] = { entry.guild, entry.guildRealm }
             end
         end
         for composite, section in pairs(cap.guildbank) do
@@ -3272,7 +3265,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
                 guildName = guildName or composite
                 realm = realm or ""
             end
-            local key = "guildbank:" .. guildName .. "\1" .. realm
+            local key = "guildbank:" .. guildName .. "\1" .. EmpireManager:NormRealm(realm)
             if not bankMap[key] and not EmpireManager:IsGuildBlacklisted(guildName, realm) then
                 bankMap[key] = {
                     label = guildName .. " Guild Bank",
@@ -3651,7 +3644,7 @@ local function GetTabLabel(cap, bankType, charGUID, guildName, tabNum, guildReal
 end
 
 -- Build destination text for a storage assignment
-local function FormatDestText(asn)
+local function FormatDestText(asn, withRealm)
     local tabSuffix = ""
     if asn.tabs and #asn.tabs > 0 then
         if #asn.tabs == 1 then
@@ -3674,7 +3667,7 @@ local function FormatDestText(asn)
             if asn.char then
                 local e = EmpireManager.db.global.registry[asn.char]
                 if e then
-                    charName = EmpireManager:ClassColoredName(e)
+                    charName = withRealm and EmpireManager:ClassColoredNameRealm(e) or EmpireManager:ClassColoredName(e)
                 end
             end
             destText = charName .. " Bank" .. tabSuffix
@@ -3928,7 +3921,7 @@ function EMStorageRowMixin:OnLoad()
         end
         GameTooltip:AddLine(titleText, 1, 0.82, 0)
         GameTooltip:AddLine(" ")
-        local destText = FormatDestText(d.asn)
+        local destText = FormatDestText(d.asn, true)
         if d.asn.expansions and #d.asn.expansions > 0 then
             destText = destText:gsub("(|T)", "\n%1", 1)
         end
@@ -5106,7 +5099,7 @@ local function RestockEntryChars(entry)
     return {}
 end
 
-local function RestockDestText(entry)
+local function RestockDestText(entry, withRealm)
     if entry.dest == "warbandbank" then
         return "|cff66b3ffWarband|r Bank"
     elseif entry.dest == "guildbank" then
@@ -5124,7 +5117,10 @@ local function RestockDestText(entry)
                 return "Character Bank"
             end
             local e = EmpireManager.db.global.registry[guid]
-            local charName = e and EmpireManager:ClassColoredName(e) or "?"
+            local charName = "?"
+            if e then
+                charName = withRealm and EmpireManager:ClassColoredNameRealm(e) or EmpireManager:ClassColoredName(e)
+            end
             return charName .. suffix
         end
         -- Multiple characters: list as many names as fit a plain-text budget,
@@ -5401,7 +5397,7 @@ function EMRestockRowMixin:OnLoad()
             local suffix = (entry.dest == "bags") and "Bags" or "Bank"
             local chars = RestockEntryChars(entry)
             if #chars <= 1 then
-                GameTooltip:AddLine("Keep in: " .. RestockDestText(entry):gsub("|cff%x%x%x%x%x%x", ""):gsub("|r", ""), 1, 1, 1)
+                GameTooltip:AddLine("Keep in: " .. RestockDestText(entry, true), 1, 1, 1)
             else
                 -- Per-character fill: "8/10  Name" (count colored by met/short/no-data).
                 local target = entry.target or 0
@@ -5417,11 +5413,13 @@ function EMRestockRowMixin:OnLoad()
                     else
                         hex, fill = "ffff3333", c.count .. "/" .. target
                     end
-                    GameTooltip:AddLine(string.format("   |c%s%s|r  %s", hex, fill, c.name), 1, 1, 1)
+                    local reg = EmpireManager.db.global.registry[c.guid]
+                    local name = reg and EmpireManager:ClassColoredNameRealm(reg) or c.name
+                    GameTooltip:AddLine(string.format("   |c%s%s|r  %s", hex, fill, name), 1, 1, 1)
                 end
             end
         else
-            GameTooltip:AddLine("Keep in: " .. RestockDestText(entry):gsub("|cff%x%x%x%x%x%x", ""):gsub("|r", ""), 1, 1, 1)
+            GameTooltip:AddLine("Keep in: " .. RestockDestText(entry), 1, 1, 1)
         end
         -- Full profession list (the column caps with +N)
         local profs = RestockProfList(entry.itemID)

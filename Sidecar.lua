@@ -93,6 +93,7 @@ function EmpireManager:OpenSidecar(guid)
     f:InitTabSystem()
 
     self.sidecarGUID = guid
+    self.lastSelectedGUID = guid
 
     -- Anchor to dashboard right edge
     f:ClearAllPoints()

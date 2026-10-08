@@ -669,6 +669,7 @@ function EmpireManagerFrameMixin:OnHide()
         EmpireManager:CloseSidecar()
     end
     EmpireManager._hasScrolledToPlayer = nil
+    EmpireManager.lastSelectedGUID = nil -- reopening the window highlights the logged-in character
 end
 
 function EmpireManagerFrameMixin:InitCharactersGrid()
@@ -911,11 +912,11 @@ function EmpireManager:RefreshVisibleRows()
     end)
 end
 
--- Which row the grid highlights: the Sidecar's character, or none when it's closed.
--- No fallback to the logged-in character: re-clicking a row closes its Sidecar, and a
--- highlight jumping to another row then read as navigating away.
+-- Which row the grid highlights: the Sidecar's character while it's open, then the
+-- last character opened (closing the Sidecar keeps its row highlighted), then the
+-- logged-in character (reset each time the window closes, see OnHide).
 function EmpireManager:GetSelectedGUID()
-    return self.sidecarGUID
+    return self.sidecarGUID or self.lastSelectedGUID or self.playerGUID
 end
 
 -- Repaint only the selection highlight on visible rows. Cheaper than

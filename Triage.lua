@@ -2068,6 +2068,57 @@ local function GetSystemRuleInfo(action)
     end
 end
 
+-- Tooltip only: show the recipient in "Mail to X" / "Stash in Warband for X" as
+-- class-colored "Name-Realm". X is "Name" (same realm for mail, cross-realm for a
+-- Warband stash) or "Name-Realm". Left unchanged when no single character matches.
+local ACTION_NAME_PREFIXES = { "Mail to ", "Stash in Warband for " }
+
+-- Registry entry for a triage recipient: "Name-Realm", or a bare "Name" on this
+-- realm (sameRealm, the mail case) or on another realm (the Warband stash case).
+-- nil when no single character matches.
+function EmpireManager:ResolveRecipientEntry(who, sameRealm)
+    local name, realm = who:match("^([^%-]+)%-(.+)$")
+    name = name or who
+    local myRealm = self:NormRealm(GetRealmName())
+    local wantRealm = realm and self:NormRealm(realm) or (sameRealm and myRealm) or nil
+    local found, count = nil, 0
+    for guid, e in pairs(self.db.global.registry) do
+        if e.name == name and guid ~= self.playerGUID then
+            local r = self:NormRealm(e.realm)
+            if (wantRealm and r == wantRealm) or (not wantRealm and r ~= myRealm) then
+                found, count = e, count + 1
+            end
+        end
+    end
+    return count == 1 and found or nil
+end
+
+-- Class-colored "Name-Realm" for a mail recipient address, or the address as-is.
+function EmpireManager:FormatMailRecipient(recipient)
+    local e = self:ResolveRecipientEntry(recipient, true)
+    return e and self:ClassColoredNameRealm(e) or recipient
+end
+
+local function ColorActionRecipient(head)
+    for _, prefix in ipairs(ACTION_NAME_PREFIXES) do
+        if head:sub(1, #prefix) == prefix then
+            local rest = head:sub(#prefix + 1)
+            local who, after = rest:match("^(.-)(%s*<.*)$")
+            who = who or rest
+            after = after or ""
+            if who == "" then
+                return head
+            end
+            local found = EmpireManager:ResolveRecipientEntry(who, prefix == "Mail to ")
+            if not found then
+                return head
+            end
+            return prefix .. EmpireManager:ClassColoredNameRealm(found) .. after
+        end
+    end
+    return head
+end
+
 function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
     opts = opts or {}
     local skipItemsTable = opts.skipItems or self.triageSkippedItems
@@ -2256,10 +2307,10 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
             end
             local head, tail = result.action:match("^(.-)%s*%((.+)%)%s*$")
             if head and head ~= "" then
-                GameTooltip:AddLine(head, 1, 0.82, 0, true)
+                GameTooltip:AddLine(ColorActionRecipient(head), 1, 0.82, 0, true)
                 GameTooltip:AddLine(tail, 1, 0.82, 0, true)
             else
-                GameTooltip:AddLine(result.action, 1, 0.82, 0, true)
+                GameTooltip:AddLine(ColorActionRecipient(result.action), 1, 0.82, 0, true)
             end
         end
 
@@ -2869,6 +2920,23 @@ function EmpireManager:_StartVendorSell(autoItems, confirmItems)
     self._vendorSelling = true
     local gen = self:StartBulkOperation()
 
+    -- Sell one quality tier at a time, retries included, so a junk item the server
+    -- rejected as busy is resold before any better item instead of after it.
+    local tiersByQuality = {}
+    local qualities = {}
+    for _, e in ipairs(vendorItems) do
+        local q = e.item.quality or 0
+        if not tiersByQuality[q] then
+            tiersByQuality[q] = {}
+            qualities[#qualities + 1] = q
+        end
+        local tier = tiersByQuality[q]
+        tier[#tier + 1] = e
+    end
+    table.sort(qualities)
+    local tierIdx = 1
+    vendorItems = tiersByQuality[qualities[1]]
+
     local addon = self
     local totalSold = 0
     local goldBefore = GetMoney()
@@ -2895,8 +2963,21 @@ function EmpireManager:_StartVendorSell(autoItems, confirmItems)
         CheckBagsFull()
     end
 
-    -- Sell remaining items, wait for bags to settle, retry unsold ones
-    local function sellBatch()
+    local sellBatch
+
+    local function nextTier()
+        tierIdx = tierIdx + 1
+        if tierIdx > #qualities then
+            finishSelling()
+            return
+        end
+        vendorItems = tiersByQuality[qualities[tierIdx]]
+        attempt = 0
+        sellBatch()
+    end
+
+    -- Sell remaining items of the current tier, wait for bags to settle, retry unsold ones
+    function sellBatch()
         if addon:IsBulkCancelled(gen) then
             return
         end
@@ -2915,7 +2996,7 @@ function EmpireManager:_StartVendorSell(autoItems, confirmItems)
         end
 
         if #remaining == 0 then
-            finishSelling()
+            nextTier()
             return
         end
 
@@ -2969,15 +3050,17 @@ function EmpireManager:_StartVendorSell(autoItems, confirmItems)
                 end
             end
 
-            if soldThisRound == 0 then
-                -- Nothing moved: either an empty merchant or a popup blocked the
-                -- last item(s). Either way, finish and refresh so the list clears.
-                finishSelling(totalSold == 0 and "This merchant doesn't buy items" or nil)
+            if soldThisRound == 0 and totalSold == 0 then
+                -- Nothing has ever sold: the merchant doesn't buy items.
+                finishSelling("This merchant doesn't buy items")
+            elseif soldThisRound == 0 then
+                -- A popup blocked the last item(s) of this tier: move on.
+                nextTier()
             elseif soldThisRound < #remaining and attempt < maxRetries then
                 -- Some items were busy - retry the rest
                 sellBatch()
             else
-                finishSelling()
+                nextTier()
             end
         end
 
@@ -3550,28 +3633,11 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
     f.TitleText:SetText("EmpireManager - Mail")
     f:SetHeight(400)
 
-    -- Look up realm + class from registry (class drives the name color).
-    -- Cross-realm warbound recipients arrive as "Name-Realm" (the SendMail
-    -- address form); split off the realm so the registry name match still works.
-    local lookupName, addrRealm = recipient, nil
-    local dashName, dashRealm = recipient:match("^(.+)%-(.+)$")
-    if dashName then
-        lookupName, addrRealm = dashName, dashRealm
-    end
-    local recipientRealm, recipientClass = nil, nil
-    for _, e in pairs(self.db.global.registry) do
-        if e.name == lookupName and (not addrRealm or e.realm == addrRealm) then
-            recipientRealm = e.realm
-            recipientClass = e.class
-            break
-        end
-    end
-    local displayName = recipientRealm and recipientRealm ~= "" and (lookupName .. " - " .. recipientRealm)
-        or recipient
-    local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[recipientClass]
-    local displayNameColored = cc
-            and cc:WrapTextInColorCode(displayName)
-        or ("|cffffffff" .. displayName .. "|r")
+    -- Class-colored "Name-Realm". A bare name is on this realm (that is where
+    -- SendMail delivers it); cross-realm recipients arrive as "Name-Realm".
+    local recipientEntry = self:ResolveRecipientEntry(recipient, true)
+    local displayNameColored = recipientEntry and self:ClassColoredNameRealm(recipientEntry)
+        or ("|cffffffff" .. recipient .. "|r")
 
     -- Clear previous content
     if f._widgets then
@@ -4063,7 +4129,7 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
                 self:ChatMsg(
                     string.format(
                         "|cffffcc00[Triage]|r Mail to %s failed, mailed %d items before failure",
-                        recipient,
+                        self:FormatMailRecipient(recipient),
                         totalSent
                     )
                 )
@@ -4089,7 +4155,7 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
             self:ChatMsg(
                 string.format(
                     "|cffffcc00[Triage]|r Mail to %s aborted: no items attached (mail UI may have refused the attach)",
-                    recipient
+                    self:FormatMailRecipient(recipient)
                 )
             )
             if onComplete then
@@ -7666,13 +7732,12 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
 
     local bl = self.db.global.guildBlacklist or {}
     -- Keys are "Guild-Realm" composites (or bare guild names for legacy
-    -- entries). Show the realm as a readable suffix but remove by the raw key.
+    -- entries). Show a readable label but remove by the raw key.
     local sorted = {}
     for blKey in pairs(bl) do
-        local g, r = blKey:match("^(.+)-([^-]+)$")
         sorted[#sorted + 1] = {
             key = blKey,
-            label = (g and r) and (g .. " - " .. r) or blKey,
+            label = self:GuildBlacklistLabel(blKey),
         }
     end
     table.sort(sorted, function(a, b)
