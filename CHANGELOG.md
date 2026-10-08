@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.8] - 2026-10-08
+
+### Changed
+
+- **Character names show their realm in tooltips and dialogs.** Triage "Mail to" and "Stash in Warband for" tooltips, the mail dialog, mail chat messages, and the Storage and Restock tooltips and bank labels now show class-colored Name-Realm, so alts with the same name on different realms are easy to tell apart.
+
+### Fixed
+
+- **The last row you opened stays highlighted.** Closing a character's panel no longer clears the highlight. Reopening the window highlights your logged-in character.
+- **Guilds on realms with a hyphen in the name (like Azjol-Nerub) match correctly.** Guild banks no longer split into duplicate rows in the Storage tab, Restock reaches the right guild bank, and existing blacklist entries still work and show a readable name.
+- **Vendor All sells one quality at a time, lowest first.** An item the server rejected as busy is now retried before any better item is sold.
+
 ## [1.2.7] - 2026-09-25
 
 ### Fixed
