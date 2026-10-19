@@ -1,8 +1,8 @@
-## Interface: 120100
+## Interface: 120100, 120105, 120107
 ## Title: EmpireManager
 ## Notes: One addon to manage every alt, every bag, every bank.
 ## Author: l0neshad0w
-## Version: 1.2.8
+## Version: 1.2.9
 ## SavedVariables: EmpireManagerDB
 ## IconTexture: Interface\AddOns\EmpireManager\textures\logo256
 ## OptionalDeps: TradeSkillMaster, Pawn

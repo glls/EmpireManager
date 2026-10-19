@@ -1940,10 +1940,6 @@ function EmpireManager:BAG_UPDATE_DELAYED()
     -- Mark bag scan cache stale - RunTriageAsync will re-scan on next call.
     self._bagsDirty = true
 
-    -- Re-check openable containers so freshly looted chests get announced.
-    -- Session-scoped dedup inside HintOpenableContainers prevents spam.
-    self:HintOpenableContainers()
-
     -- Update free bag slots snapshot. Gold is handled by PLAYER_MONEY.
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
@@ -1961,36 +1957,54 @@ function EmpireManager:BAG_UPDATE_DELAYED()
         end
     end
 
-    -- Debounced triage refresh: resets on each bag event, fires 0.3s after last change
+    -- While the bank is open, the bank snapshot (capacity + restock counts) is
+    -- owed too. Deferred into the debounce below rather than run per event: a
+    -- deposit loop or loot burst fires BAG_UPDATE_DELAYED many times in a row,
+    -- and each snapshot walks every bank slot. Sync readers (RunTriage) call
+    -- FlushBankSnapshot so routing never sees stale capacity.
+    if self.bankIsOpen then
+        self._bankSnapshotPending = true
+    end
+
+    -- Debounced work: resets on each bag event, fires 0.3s after last change.
+    -- Order matters: flush the bank snapshot before EM_TRIAGE_REFRESH so the
+    -- silent rescan classifies against fresh capacity.
     if self._bagRefreshTimer then
         self._bagRefreshTimer:Cancel()
     end
     self._bagRefreshTimer = C_Timer.NewTimer(0.3, function()
         self._bagRefreshTimer = nil
+        -- Re-check openable containers so freshly looted chests get announced.
+        -- Session-scoped dedup inside HintOpenableContainers prevents spam.
+        self:HintOpenableContainers()
+        self:FlushBankSnapshot()
         self:SendMessage("EM_TRIAGE_REFRESH")
     end)
+end
 
-    -- While the bank is open, rescan capacity so the Storage tab tracks
-    -- deposits/withdrawals live. Cheap (~600 reads), runs at most once per
-    -- BAG_UPDATE_DELAYED event (already coalesced by the client).
-    if self.bankIsOpen then
-        self:RefreshBankCapacity()
+-- Run the bank snapshot owed by BAG_UPDATE_DELAYED, if any. Re-snapshots
+-- capacity (Storage tab fill levels, overflow routing) and the per-item counts
+-- that feed the Restock tab's Fill column, then refreshes that tab. Covers
+-- manual drag-out from warband/char bank and Triage Take Out: the bank stayed
+-- open, only bags changed, so the ledger was stale until close/reopen.
+-- Guild bank is deliberately skipped: SnapshotGuildBank does a full multi-tab
+-- query with server round-trips, too expensive per bag change. Guild-bank
+-- restock deposits re-snapshot in ExecuteRestockPlan's completion callback;
+-- manual guild-bank withdrawals stay stale until close/reopen.
+-- `fromScan` = called by a triage scan that is about to classify anyway: skip
+-- the bank-tab repaint RefreshBankCapacity would otherwise schedule.
+function EmpireManager:FlushBankSnapshot(fromScan)
+    if not self._bankSnapshotPending then
+        return
     end
-    -- Also re-snapshot the per-item counts that feed the Restock tab's Fill
-    -- column, and refresh the tab. Covers manual drag-out from warband/char
-    -- bank and Triage Take Out: the bank stayed open, only bags changed, so
-    -- the ledger was stale until the bank got closed and reopened.
-    -- Guild bank is deliberately skipped here: SnapshotGuildBank does a full
-    -- multi-tab query with server round-trips (~300ms + QueryGuildBankTab per
-    -- tab), too expensive to fire on every BAG_UPDATE_DELAYED. Guild-bank
-    -- restock deposits already re-snapshot in ExecuteRestockPlan's completion
-    -- callback; manual guild-bank withdrawals stay stale until close/reopen.
-    if self.bankIsOpen then
-        self:SnapshotBankItemCounts()
-        self:SnapshotBagItemCounts()
-        if self.RefreshRestockTab then
-            self:RefreshRestockTab()
-        end
+    self._bankSnapshotPending = nil
+    if not self.bankIsOpen then
+        return
+    end
+    self:RefreshBankCapacity(fromScan)
+    self:SnapshotBagItemCounts()
+    if self.RefreshRestockTab then
+        self:RefreshRestockTab()
     end
 end
 
@@ -2445,59 +2459,76 @@ function EmpireManager:GetRestockDestKeys()
     return keys
 end
 
--- Snapshot per-item counts in the currently open bank containers into
--- db.global.restockCounts, for the Restock fill column. Warband is account-shared
--- (single key); char bank is keyed per owning character. Reads only containers that
--- actually have slots, so it is safe to call regardless of which bank type is open.
--- Synchronous (sub-ms); call up-front so a mid-scan bank close can't lose the data.
-function EmpireManager:SnapshotBankItemCounts()
-    local guid = self.playerGUID
-    if not guid then
-        return
+-- One walk over the character bank (containers 6-11) and warband bank (12-16).
+-- Returns, per bank: an array of { total, used } per tab, and a tally of the
+-- `want` itemIDs. Character tabs are indexed by tab number (container - 5);
+-- warband tabs by purchased-tab order. A bank's tally is nil when none of its
+-- containers had slots (that bank type isn't open), so callers never overwrite
+-- good data with empties. Shared by SnapshotBankItemCounts and
+-- RefreshBankCapacity so a bag change costs one bank walk, not two.
+local function ScanBankContainers(want)
+    local charTabs, wbTabs = {}, {}
+    local charTally, wbTally
+    for bag = 6, 16 do
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        if numSlots > 0 then
+            local isChar = bag <= 11
+            local tally
+            if isChar then
+                charTally = charTally or {}
+                tally = charTally
+            else
+                wbTally = wbTally or {}
+                tally = wbTally
+            end
+            local used = 0
+            for slot = 1, numSlots do
+                local info = C_Container.GetContainerItemInfo(bag, slot)
+                if info then
+                    used = used + 1
+                    if info.itemID and want[info.itemID] then
+                        tally[info.itemID] = (tally[info.itemID] or 0) + (info.stackCount or 1)
+                    end
+                end
+            end
+            if isChar then
+                charTabs[bag - 5] = { total = numSlots, used = used }
+            else
+                wbTabs[#wbTabs + 1] = { total = numSlots, used = used }
+            end
+        end
     end
+    return charTabs, wbTabs, charTally, wbTally
+end
+
+-- Store bank item tallies into db.global.restockCounts, for the Restock fill
+-- column. Warband is account-shared (single key); char bank is keyed per owning
+-- character. A nil tally (bank type not open) leaves the old snapshot alone.
+local function StoreBankItemCounts(self, guid, charTally, wbTally)
     local counts = self.db.global.restockCounts
     if not counts then
         counts = {}
         self.db.global.restockCounts = counts
     end
-
-    local want = self:GetRestockItemIDs()
-
-    -- Character bank: containers 6-11.
-    local charTally, sawChar = {}, false
-    for bag = 6, 11 do
-        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
-        if numSlots > 0 then
-            sawChar = true
-            for slot = 1, numSlots do
-                local info = C_Container.GetContainerItemInfo(bag, slot)
-                if info and info.itemID and want[info.itemID] then
-                    charTally[info.itemID] = (charTally[info.itemID] or 0) + (info.stackCount or 1)
-                end
-            end
-        end
-    end
-    if sawChar then
+    if charTally then
         counts["charbank:" .. guid] = charTally
     end
-
-    -- Warband bank: containers 12-16 (account-shared).
-    local wbTally, sawWb = {}, false
-    for bag = 12, 16 do
-        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
-        if numSlots > 0 then
-            sawWb = true
-            for slot = 1, numSlots do
-                local info = C_Container.GetContainerItemInfo(bag, slot)
-                if info and info.itemID and want[info.itemID] then
-                    wbTally[info.itemID] = (wbTally[info.itemID] or 0) + (info.stackCount or 1)
-                end
-            end
-        end
-    end
-    if sawWb then
+    if wbTally then
         counts["warbandbank"] = wbTally
     end
+end
+
+-- Snapshot per-item counts in the currently open bank containers. Reads only
+-- containers that actually have slots, so it is safe to call regardless of which
+-- bank type is open. Synchronous (sub-ms); call up-front so a mid-scan bank close
+-- can't lose the data.
+function EmpireManager:SnapshotBankItemCounts()
+    local guid = self.playerGUID
+    if not guid then
+        return
+    end
+    local _, _, charTally, wbTally = ScanBankContainers(self:GetRestockItemIDs())
+    StoreBankItemCounts(self, guid, charTally, wbTally)
 end
 
 -- Snapshot the current character's bag item counts (bags 0-5) into
@@ -2536,11 +2567,12 @@ function EmpireManager:CountItemInBags(itemID)
     return C_Item.GetItemCount(itemID, false, false, true, false) or 0
 end
 
--- Lightweight live rescan of character + warband bank capacity. Synchronous;
--- runs only while the bank is open. ~600 cheap C_Container reads, sub-ms.
--- Used to keep Storage tab fill levels in sync with deposits/withdrawals
--- without waiting for the next bank open.
-function EmpireManager:RefreshBankCapacity()
+-- Live rescan of character + warband bank capacity and restock item counts, in
+-- one bank walk. Synchronous; runs only while the bank is open (via
+-- FlushBankSnapshot, debounced after bag changes). Keeps Storage tab fill levels
+-- and the Restock Fill column in sync with deposits/withdrawals without waiting
+-- for the next bank open. `fromScan`: see FlushBankSnapshot.
+function EmpireManager:RefreshBankCapacity(fromScan)
     if not self.bankIsOpen then
         return
     end
@@ -2550,35 +2582,27 @@ function EmpireManager:RefreshBankCapacity()
         cap.charbank[guid] = {}
     end
 
-    -- Character bank tabs (container IDs 6-11)
-    for tabIdx = 1, 6 do
-        local bag = tabIdx + 5
-        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
-        if numSlots > 0 then
-            local used = 0
-            for slot = 1, numSlots do
-                if C_Container.GetContainerItemInfo(bag, slot) then
-                    used = used + 1
-                end
-            end
-            cap.charbank[guid][tabIdx] = { total = numSlots, used = used }
-        end
-    end
+    local charTabs, wbTabs, charTally, wbTally = ScanBankContainers(self:GetRestockItemIDs())
+    StoreBankItemCounts(self, guid, charTally, wbTally)
 
-    -- Warband bank tabs (container IDs 12-16)
-    local wbIdx = 0
-    for bag = 12, 16 do
-        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
-        if numSlots > 0 then
-            wbIdx = wbIdx + 1
-            local used = 0
-            for slot = 1, numSlots do
-                if C_Container.GetContainerItemInfo(bag, slot) then
-                    used = used + 1
-                end
-            end
-            cap.warbandbank[wbIdx] = { total = numSlots, used = used }
+    -- Write per-tab capacity, noting whether any tab's fill actually changed.
+    -- Stacking onto an existing bank stack (or a bags-only change) leaves
+    -- capacity untouched, and then nothing downstream needs to rerun.
+    local changed = false
+    local charCap = cap.charbank[guid]
+    for tabIdx, t in pairs(charTabs) do
+        local old = charCap[tabIdx]
+        if not old or old.total ~= t.total or old.used ~= t.used then
+            changed = true
         end
+        charCap[tabIdx] = t
+    end
+    for wbIdx, t in ipairs(wbTabs) do
+        local old = cap.warbandbank[wbIdx]
+        if not old or old.total ~= t.total or old.used ~= t.used then
+            changed = true
+        end
+        cap.warbandbank[wbIdx] = t
     end
 
     cap.charbank[guid]._scannedAt = time()
@@ -2599,9 +2623,26 @@ function EmpireManager:RefreshBankCapacity()
         entry.totalBankSlots = totalBank
     end
 
+    if not changed then
+        return
+    end
+
     -- Capacity changed -> drop cached triage classifications so overflow
     -- routing (HasFreeCapacity) reflects fresh fill levels on next scan.
-    self:InvalidateStorageCache()
+    -- Not InvalidateStorageCache: the storage cache is built from the static
+    -- PROF_ITEM_MAP / PROF_ITEM_OVERRIDES tables and doesn't depend on capacity.
+    self._bagsDirty = true
+    self.triageResults = nil
+    self.bankTriageResults = nil
+    self._triageFingerprint = nil
+    self._bankTriageFingerprint = nil
+    self._triageFingerprintCount = nil
+    self._bankTriageFingerprintCount = nil
+    -- The Bags tab gets its silent rescan from EM_TRIAGE_REFRESH on the same
+    -- debounce tick. That handler skips bank tabs, so repaint those here.
+    if not fromScan and self.triageFrame and self.triageFrame:IsShown() and self._triageActiveTab ~= "bags" then
+        self:OnTriageOptionChanged()
+    end
 
     -- Repaint the Storage tab if it's the active page.
     local frame = EmpireManagerFrame
@@ -2611,6 +2652,9 @@ function EmpireManager:RefreshBankCapacity()
 end
 
 function EmpireManager:BANKFRAME_CLOSED()
+    -- Settle a snapshot still waiting on the bag-change debounce, so closing the
+    -- bank right after a move doesn't lose the final capacity/counts.
+    self:FlushBankSnapshot()
     self.bankIsOpen = false
     self:SendMessage("EM_BANK_CLOSED")
 end
@@ -2623,7 +2667,6 @@ function EmpireManager:PLAYER_INTERACTION_MANAGER_FRAME_SHOW(_, interactionType)
     if interactionType == INTERACTION_GUILD_BANK then
         self.guildBankIsOpen = true
         self._guildBankSnapshotDone = false
-        self.MoveContexts.guildbank._currentTab = nil -- reset cached tab
         -- Refresh triage tab visibility + deposit button immediately so the UI
         -- reacts without waiting for the snapshot chain to finish.
         if self.triageFrame and self.triageFrame:IsShown() then
@@ -2661,6 +2704,7 @@ function EmpireManager:PLAYER_INTERACTION_MANAGER_FRAME_HIDE(_, interactionType)
         self:SendMessage("EM_BANK_CLOSED")
     elseif interactionType == INTERACTION_ACCOUNT_BANKER then
         if self.bankIsOpen then
+            self:FlushBankSnapshot()
             self.bankIsOpen = false
             self:SendMessage("EM_BANK_CLOSED")
         end

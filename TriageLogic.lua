@@ -283,15 +283,16 @@ MoveContexts.warbandbank = {
 MoveContexts.guildbank = {
     name = "Guild Bank",
     batchSize = 1, -- ONE move at a time (proven rule)
-    _currentTab = nil, -- cached to avoid redundant SetCurrentGuildBankTab calls
-    EnsureTab = function(self, tab)
-        if self._currentTab ~= tab then
+    -- Select `tab` before a pickup (the confirmed deposit pattern). Compares
+    -- against the live tab, not a cache: the user can click a tab at any time.
+    -- Reads never call this: GetGuildBankItemInfo takes the tab directly, and
+    -- selecting the tab on every read made the visible tab flicker.
+    EnsureTab = function(_self, tab)
+        if GetCurrentGuildBankTab() ~= tab then
             SetCurrentGuildBankTab(tab)
-            self._currentTab = tab
         end
     end,
     GetItemInfo = function(tab, slot)
-        MoveContexts.guildbank:EnsureTab(tab)
         local tex, count, locked = GetGuildBankItemInfo(tab, slot)
         if not tex then
             return nil
@@ -408,29 +409,43 @@ end
 local RECIPE_SUBCLASS_TO_PROF = EmpireManager.RECIPE_SUBCLASS_TO_PROF
 local PROF_EQUIP_SUBCLASS_TO_PROF = EmpireManager.PROF_EQUIP_SUBCLASS_TO_PROF
 
+-- Linear membership test on a rule's subcategory array. The arrays hold a
+-- handful of entries, and this runs per item x rule on every scan, so a scan
+-- beats allocating a lookup set each call. (Not cached on the rule: rules are
+-- SavedVariables, a cached set would be written to disk.)
+local function HasSubcat(subcats, key)
+    for i = 1, #subcats do
+        if subcats[i] == key then
+            return true
+        end
+    end
+    return false
+end
+
 local function MatchesSubcategory(assignment, item)
     local subcats = assignment.subcategories
     if not subcats or #subcats == 0 then
         return true
     end
 
-    local subcatSet = {}
-    for _, sc in ipairs(subcats) do
-        subcatSet[sc] = true
-    end
     local prof = assignment.profession
 
     if prof == "equipment_boe" or prof == "equipment_boa" then
-        if subcatSet["weapons"] and item.itemClassID == 2 then
+        if HasSubcat(subcats, "weapons") and item.itemClassID == 2 then
             return true
         end
-        if subcatSet["armor"] and item.itemClassID == 4 and item.itemSubClassID >= 1 and item.itemSubClassID <= 4 then
+        if
+            HasSubcat(subcats, "armor")
+            and item.itemClassID == 4
+            and item.itemSubClassID >= 1
+            and item.itemSubClassID <= 4
+        then
             return true
         end
-        if subcatSet["jewelry"] and item.itemClassID == 4 and item.itemSubClassID == 0 then
+        if HasSubcat(subcats, "jewelry") and item.itemClassID == 4 and item.itemSubClassID == 0 then
             return true
         end
-        if subcatSet["other"] then
+        if HasSubcat(subcats, "other") then
             local isKnown = item.itemClassID == 2
                 or (item.itemClassID == 4 and item.itemSubClassID >= 0 and item.itemSubClassID <= 4)
             if not isKnown then
@@ -440,23 +455,23 @@ local function MatchesSubcategory(assignment, item)
         return false
     elseif prof == "recipes" then
         local recipeProfKey = RECIPE_SUBCLASS_TO_PROF[item.itemSubClassID]
-        return recipeProfKey and (subcatSet[recipeProfKey] or false) or false
+        return recipeProfKey and HasSubcat(subcats, recipeProfKey) or false
     elseif prof == "equipment_prof" then
         -- classID 19: subClassID IS the profession.
         local equipProfKey = PROF_EQUIP_SUBCLASS_TO_PROF[item.itemSubClassID]
-        return equipProfKey and (subcatSet[equipProfKey] or false) or false
+        return equipProfKey and HasSubcat(subcats, equipProfKey) or false
     elseif prof == "consumables" then
         local sub = item.itemSubClassID
-        if subcatSet["potions"] and sub == 1 then
+        if HasSubcat(subcats, "potions") and sub == 1 then
             return true
         end
-        if subcatSet["flasks"] and (sub == 2 or sub == 3) then
+        if HasSubcat(subcats, "flasks") and (sub == 2 or sub == 3) then
             return true
         end
-        if subcatSet["food"] and sub == 5 then
+        if HasSubcat(subcats, "food") and sub == 5 then
             return true
         end
-        if subcatSet["other"] and sub ~= 1 and sub ~= 2 and sub ~= 3 and sub ~= 5 then
+        if HasSubcat(subcats, "other") and sub ~= 1 and sub ~= 2 and sub ~= 3 and sub ~= 5 then
             return true
         end
         return false
@@ -1539,6 +1554,20 @@ function EmpireManager:IsKnownCollectible(item)
     return false
 end
 
+-- Session cache of the two TSM prices ShouldDisenchant needs, keyed by itemLink.
+-- ShouldDisenchant runs on every silent rescan (bag changes while triage is open,
+-- MERCHANT_SHOW / MAIL_SHOW), and TSM lookups are expensive, so each link is
+-- priced once. Caches prices rather than the decision so a threshold change
+-- still applies at once. Holds only BoE gear seen this session. Cleared by the
+-- triage Rescan button so a manual rescan picks up fresh TSM data.
+-- An empty answer (both prices nil) is not cached: TSM may still be loading its
+-- price data, and caching nil would pin the threshold fallback for the session.
+local dePriceCache = {}
+
+function EmpireManager:ClearTSMPriceCache()
+    wipe(dePriceCache)
+end
+
 -- Determine if a BoE item should be disenchanted rather than sold on the AH.
 -- With TSM: disenchant value > market value → DE is more profitable.
 -- Without TSM: per-unit sell price < threshold → DE (user-configured fallback).
@@ -1552,8 +1581,18 @@ function EmpireManager:ShouldDisenchant(item)
         return false
     end
 
-    local deValue = self:GetTSMPrice(item.itemLink, "DBDisenchant")
-    local marketValue = self:GetTSMPrice(item.itemLink, "DBMarket")
+    local link = item.itemLink
+    local prices = link and dePriceCache[link]
+    if not prices then
+        prices = {
+            de = self:GetTSMPrice(link, "DBDisenchant"),
+            market = self:GetTSMPrice(link, "DBMarket"),
+        }
+        if link and (prices.de or prices.market) then
+            dePriceCache[link] = prices
+        end
+    end
+    local deValue, marketValue = prices.de, prices.market
 
     if deValue and marketValue then
         return deValue > marketValue
@@ -2744,6 +2783,10 @@ end
 -- Sync wrapper: used only by mid-deposit RebuildMoveList and TriageDebugCheck.
 -- All other callers use RunTriageAsync or cached self.triageResults.
 function EmpireManager:RunTriage()
+    -- Settle a bank snapshot still waiting on the bag-change debounce, so
+    -- overflow routing (HasFreeCapacity) classifies against fresh capacity.
+    self:FlushBankSnapshot(true)
+
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
     if not entry then
@@ -3026,6 +3069,10 @@ end
 -------------------------------------------------------------------------------
 
 function EmpireManager:RunTriageAsync(callback)
+    -- Settle a bank snapshot still waiting on the bag-change debounce, so
+    -- overflow routing (HasFreeCapacity) classifies against fresh capacity.
+    self:FlushBankSnapshot(true)
+
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
     if not entry then
@@ -3104,20 +3151,25 @@ function EmpireManager:RunTriageAsync(callback)
             return a.item.itemName < b.item.itemName
         end)
 
-        addon.triageResults = results
-        addon.triageLastScan = time()
-        addon._bagsDirty = false
-        addon:WarnOnUnreachableDestinations(results)
-
-        -- Track uncached count for deferred rescan
-        local uncachedCount = 0
+        -- Items whose data the client hadn't loaded yet were classified without
+        -- sell price or item class, so they landed in Keep.
+        local uncachedIDs = {}
+        local seenIDs = {}
         for _, item in ipairs(bagItems) do
-            if item._uncached then
-                uncachedCount = uncachedCount + 1
+            if item._uncached and item.itemID and not seenIDs[item.itemID] then
+                seenIDs[item.itemID] = true
+                uncachedIDs[#uncachedIDs + 1] = item.itemID
             end
         end
 
-        return { results = results, uncachedCount = uncachedCount }
+        addon.triageResults = results
+        addon.triageLastScan = time()
+        -- Incomplete results stay dirty, so the next RunTriageAsync re-classifies
+        -- instead of serving them from cache until an unrelated bag change.
+        addon._bagsDirty = #uncachedIDs > 0
+        addon:WarnOnUnreachableDestinations(results)
+
+        return { results = results, uncachedIDs = uncachedIDs }
     end, function(packed, err)
         if not packed then
             if err then
@@ -3127,19 +3179,54 @@ function EmpireManager:RunTriageAsync(callback)
             return
         end
 
-        if packed.uncachedCount > 0 and addon.triageFrame and addon.triageFrame:IsShown() then
-            C_Timer.After(1.5, function()
-                if addon.triageFrame and addon.triageFrame:IsShown() then
-                    addon:RefreshTriageDisplay(false, true)
-                end
-            end)
+        if #packed.uncachedIDs > 0 then
+            addon:WatchUncachedItems(packed.uncachedIDs)
         end
 
         callback(packed.results)
     end)
 end
 
+-- Rescan once the client has loaded data for items a scan saw uncached.
+-- Event-driven (ITEM_DATA_LOAD_RESULT via Blizzard's ItemEventListener), so it
+-- works whether or not triage is open: closed, the dirty flag makes the next
+-- scan (vendor/mail/bank open) re-classify; open, the bags tab repaints.
+-- Each itemID is requested at most MAX_ITEM_LOAD_REQUESTS times per session,
+-- so an item that reports loaded but still returns no data can't loop rescans.
+-- A failed load fires no callback; the dirty flag still covers the next scan.
+local MAX_ITEM_LOAD_REQUESTS = 3
+local itemLoadRequests = {}
+local uncachedRescanTimer = nil
+
+function EmpireManager:WatchUncachedItems(itemIDs)
+    local addon = self
+    local function onItemLoaded()
+        -- A bag of uncached items loads as a burst: rescan once at the end.
+        if uncachedRescanTimer then
+            uncachedRescanTimer:Cancel()
+        end
+        uncachedRescanTimer = C_Timer.NewTimer(0.3, function()
+            uncachedRescanTimer = nil
+            addon._bagsDirty = true
+            if addon.triageFrame and addon.triageFrame:IsShown() then
+                addon:RefreshTriageDisplay(false, true)
+            end
+        end)
+    end
+    for _, itemID in ipairs(itemIDs) do
+        local requests = itemLoadRequests[itemID] or 0
+        if requests < MAX_ITEM_LOAD_REQUESTS and C_Item.DoesItemExistByID(itemID) then
+            itemLoadRequests[itemID] = requests + 1
+            Item:CreateFromItemID(itemID):ContinueOnItemLoad(onItemLoaded)
+        end
+    end
+end
+
 function EmpireManager:RunBankTriageAsync(callback)
+    -- Settle a bank snapshot still waiting on the bag-change debounce, so
+    -- overflow routing (HasFreeCapacity) classifies against fresh capacity.
+    self:FlushBankSnapshot(true)
+
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
     if not entry then

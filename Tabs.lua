@@ -1834,10 +1834,13 @@ function EMRosterPageMixin:OnLoad()
 end
 
 function EMRosterPageMixin:OnShow()
+    -- SetTab always runs the sub-tab callback, which calls Refresh; refreshing
+    -- again here built the whole page twice per open.
     if self._tabIDs and self._tabIDs[self._selectedTab or 1] then
         self:SetTab(self._tabIDs[self._selectedTab or 1])
+    else
+        self:Refresh()
     end
-    self:Refresh()
 end
 
 function EMRosterPageMixin:Refresh()
@@ -1845,26 +1848,12 @@ function EMRosterPageMixin:Refresh()
     local content = sf.Content
     content:SetWidth(sf:GetWidth())
 
-    -- Clear previous: hide objects and release closure references
-    if self._lines then
-        for _, obj in ipairs(self._lines) do
-            if obj.Hide then
-                obj:Hide()
-            end
-            if obj.HasScript then
-                if obj:HasScript("OnClick") then
-                    obj:SetScript("OnClick", nil)
-                end
-                if obj:HasScript("OnEnter") then
-                    obj:SetScript("OnEnter", nil)
-                end
-                if obj:HasScript("OnLeave") then
-                    obj:SetScript("OnLeave", nil)
-                end
-            end
-        end
+    -- Return last build's widgets to the pool (hides them, clears anchors and
+    -- mouse scripts). The Build* functions below reuse them by kind.
+    if not self._pool then
+        self._pool = EmpireManager:CreateWidgetPool()
     end
-    self._lines = {}
+    self._pool:ReleaseAll()
 
     local tab = self._selectedTab or 1
     local y = 8
@@ -1885,9 +1874,47 @@ function EMRosterPageMixin:Refresh()
     sf:SetVerticalScroll(0)
 end
 
-function EMRosterPageMixin:Track(obj)
-    self._lines[#self._lines + 1] = obj
-    return obj
+-- Pooled widget factories, one per kind. A factory builds the whole composite
+-- once (sub-regions, fixed anchors, fixed looks); callers set every per-use
+-- property (text, size, position, colors, scripts) each time they acquire.
+
+-- Plain text line on `content` (the pool restores the template's look on reuse).
+function EMRosterPageMixin:AcquireText(content, template)
+    return self._pool:AcquireText(content, template or FONT_NORMAL)
+end
+
+-- Button with a left-justified label filling it (click labels, character names).
+function EMRosterPageMixin:AcquireNameButton(content)
+    return self._pool:Acquire("nameButton", function()
+        local btn = CreateFrame("Button", nil, content)
+        local fs = btn:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+        fs:SetAllPoints()
+        fs:SetJustifyH("LEFT")
+        btn.fs = fs
+        return btn
+    end)
+end
+
+-- "Label:  wrapped text" row (Storage line, bank tab lines). `kind` keeps the
+-- two users apart, since they differ in line spacing and mouse handling.
+function EMRosterPageMixin:AcquireLabelRow(content, kind, labelColW, textTopPad)
+    return self._pool:Acquire(kind, function()
+        local row = CreateFrame("Frame", nil, content)
+        local labelFS = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+        labelFS:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -textTopPad)
+        labelFS:SetWidth(labelColW)
+        labelFS:SetJustifyH("RIGHT")
+        labelFS:SetJustifyV("TOP")
+        labelFS:SetWordWrap(false)
+        local fs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+        fs:SetPoint("TOPLEFT", labelFS, "TOPRIGHT", 6, 0)
+        fs:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+        fs:SetJustifyH("LEFT")
+        fs:SetJustifyV("TOP")
+        fs:SetWordWrap(true)
+        row.labelFS, row.fs = labelFS, fs
+        return row
+    end)
 end
 
 -- Helper: add a heading with separator. Returns (newY, headingFontString).
@@ -1907,21 +1934,45 @@ function EMRosterPageMixin:DrawFillBar(content, anchor, y, pct, used, total, fre
     end
 
     local BAR_W, BAR_H = 400, 19
-    local row = self:Track(CreateFrame("Frame", nil, content))
-    row:SetSize(BAR_W, BAR_H)
+    local row = self._pool:Acquire("fillBar", function()
+        local f = CreateFrame("Frame", nil, content)
+        f:SetSize(BAR_W, BAR_H)
+
+        local bg = f:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(0.1, 0.1, 0.1, 0.85)
+
+        local fill = f:CreateTexture(nil, "ARTWORK")
+        fill:SetPoint("TOPLEFT", f, "TOPLEFT", 1, -1)
+        fill:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 1, 1)
+
+        local border = CreateFrame("Frame", nil, f, "BackdropTemplate")
+        border:SetAllPoints()
+        border:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+        border:SetBackdropBorderColor(0, 0, 0, 0.7)
+
+        local pctFS = f:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+        pctFS:SetPoint("LEFT", f, "LEFT", 6, 0)
+        pctFS:SetShadowColor(0, 0, 0, 1)
+        pctFS:SetShadowOffset(1, -1)
+        pctFS:SetTextColor(1, 1, 1)
+
+        local valFS = f:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+        valFS:SetPoint("RIGHT", f, "RIGHT", -6, 0)
+        valFS:SetShadowColor(0, 0, 0, 1)
+        valFS:SetShadowOffset(1, -1)
+        valFS:SetTextColor(1, 1, 1)
+
+        f.fill, f.pctFS, f.valFS = fill, pctFS, valFS
+        return f
+    end)
     if anchor then
         row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -12)
     else
         row:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     end
 
-    local bg = row:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    bg:SetColorTexture(0.1, 0.1, 0.1, 0.85)
-
-    local fill = row:CreateTexture(nil, "ARTWORK")
-    fill:SetPoint("TOPLEFT", row, "TOPLEFT", 1, -1)
-    fill:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 1, 1)
+    local fill = row.fill
     local fw = math.max(1, math.floor((BAR_W - 2) * pct))
     fill:SetWidth(fw)
     fill:SetColorTexture(1, 1, 1, 1)
@@ -1932,26 +1983,10 @@ function EMRosterPageMixin:DrawFillBar(content, anchor, y, pct, used, total, fre
         CreateColor(math.min(1, r * 1.1), math.min(1, g * 1.1), math.min(1, b * 1.1), 0.6)
     )
 
-    local border = CreateFrame("Frame", nil, row, "BackdropTemplate")
-    border:SetAllPoints()
-    border:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
-    border:SetBackdropBorderColor(0, 0, 0, 0.7)
+    row.pctFS:SetText(string.format("%d%%", math.floor(pct * 100 + 0.5)))
+    row.valFS:SetText(string.format("%s / %s", BreakUpLargeNumbers(used), BreakUpLargeNumbers(total)))
 
-    local pctFS = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-    pctFS:SetPoint("LEFT", row, "LEFT", 6, 0)
-    pctFS:SetShadowColor(0, 0, 0, 1)
-    pctFS:SetShadowOffset(1, -1)
-    pctFS:SetTextColor(1, 1, 1)
-    pctFS:SetText(string.format("%d%%", math.floor(pct * 100 + 0.5)))
-
-    local valFS = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-    valFS:SetPoint("RIGHT", row, "RIGHT", -6, 0)
-    valFS:SetShadowColor(0, 0, 0, 1)
-    valFS:SetShadowOffset(1, -1)
-    valFS:SetTextColor(1, 1, 1)
-    valFS:SetText(string.format("%s / %s", BreakUpLargeNumbers(used), BreakUpLargeNumbers(total)))
-
-    local freeFS = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local freeFS = self:AcquireText(content)
     freeFS:SetPoint("LEFT", row, "RIGHT", 8, 0)
     freeFS:SetTextColor(0.85, 0.85, 0.85)
     local age = EmpireManager:FormatStaleAge(scannedAt)
@@ -1968,13 +2003,16 @@ function EMRosterPageMixin:AddHeading(content, y, text, skipDivider)
     if not skipDivider then
         y = y + 4 -- extra spacing above divider
 
-        local divider = self:Track(content:CreateTexture(nil, "ARTWORK"))
-        divider:SetAtlas("ui-journeys-renown-divider", true)
+        local divider = self._pool:Acquire("divider", function()
+            local t = content:CreateTexture(nil, "ARTWORK")
+            t:SetAtlas("ui-journeys-renown-divider", true)
+            return t
+        end)
         divider:SetPoint("TOP", content, "TOP", 0, -y)
         y = y + 28
     end
 
-    local fs = self:Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local fs = self:AcquireText(content, "GameFontNormalLarge")
     fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     fs:SetText("|cffffd100" .. text .. "|r")
     return y + HEADING_HEIGHT, fs
@@ -1982,7 +2020,7 @@ end
 
 -- Helper: add a stat line "Label   Value" in a row
 function EMRosterPageMixin:AddStatLine(content, y, label, value, lr, lg, lb, vr, vg, vb)
-    local fs = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local fs = self:AcquireText(content)
     fs:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
     fs:SetPoint("RIGHT", content, "RIGHT", -8, 0)
     fs:SetJustifyH("LEFT")
@@ -1994,14 +2032,10 @@ end
 
 -- Helper: interactive label with tooltip
 function EMRosterPageMixin:AddClickLabel(content, y, text, width, tooltipTitle, chars, tooltipFmt)
-    local btn = self:Track(CreateFrame("Button", nil, content))
+    local btn = self:AcquireNameButton(content)
     btn:SetSize(width, LINE_HEIGHT)
     btn:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (self._flowX or 0), -y)
-
-    local fs = btn:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-    fs:SetAllPoints()
-    fs:SetJustifyH("LEFT")
-    fs:SetText(text)
+    btn.fs:SetText(text)
 
     if chars and #chars > 0 then
         btn:SetScript("OnEnter", function(self)
@@ -2041,19 +2075,38 @@ function EMRosterPageMixin:AddBarRow(content, y, opts)
     local BAR_H = LINE_HEIGHT - 4
     local LABEL_PAD = 8
 
-    local row = self:Track(CreateFrame("Button", nil, content))
-    row:SetSize(BAR_W, LINE_HEIGHT)
-    row:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
+    local row = self._pool:Acquire("barRow", function()
+        local f = CreateFrame("Button", nil, content)
+        f:SetSize(BAR_W, LINE_HEIGHT)
 
-    local bg = row:CreateTexture(nil, "BACKGROUND")
-    bg:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -1)
-    bg:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", 0, 1)
-    bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)
+        local bg = f:CreateTexture(nil, "BACKGROUND")
+        bg:SetPoint("TOPLEFT", f, "TOPLEFT", 0, -1)
+        bg:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 1)
+        bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)
+
+        local bar = f:CreateTexture(nil, "ARTWORK")
+        bar:SetPoint("TOPLEFT", f, "TOPLEFT", 0, -1)
+
+        local label = f:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+        label:SetPoint("LEFT", f, "LEFT", LABEL_PAD, 1)
+        label:SetJustifyH("LEFT")
+        label:SetShadowColor(0, 0, 0, 1)
+        label:SetShadowOffset(1, -1)
+        label:SetAlpha(0.85)
+
+        -- Heavier shadow for readability over the bar.
+        local val = f:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+        val:SetShadowColor(0, 0, 0, 1)
+        val:SetShadowOffset(2, -2)
+
+        f.bar, f.label, f.val = bar, label, val
+        return f
+    end)
+    row:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
 
     local frac = (opts.maxValue and opts.maxValue > 0) and (opts.value / opts.maxValue) or 0
     local barWidth = math.max(2, math.floor(BAR_W * frac))
-    local bar = row:CreateTexture(nil, "ARTWORK")
-    bar:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -1)
+    local bar = row.bar
     bar:SetSize(barWidth, BAR_H)
     bar:SetColorTexture(1, 1, 1, 1)
     local br, bg2, bb = opts.r or 0.7, opts.g or 0.7, opts.b or 0.7
@@ -2065,20 +2118,14 @@ function EMRosterPageMixin:AddBarRow(content, y, opts)
 
     local labelText = opts.iconText and (opts.iconText .. " " .. opts.label) or opts.label
 
-    local fs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-    fs:SetPoint("LEFT", row, "LEFT", LABEL_PAD, 1)
-    fs:SetJustifyH("LEFT")
-    fs:SetShadowColor(0, 0, 0, 1)
-    fs:SetShadowOffset(1, -1)
-    fs:SetAlpha(0.85)
+    local fs = row.label
     fs:SetText(string.format("|cffffffff%s|r", labelText))
 
     -- Value text rendered inside the filled bar (right-aligned at the fill's right
     -- edge). If the fill is too short to hold the text, it's placed just outside, to
-    -- the right of the fill instead. Heavier shadow for readability over the bar.
-    local valFs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-    valFs:SetShadowColor(0, 0, 0, 1)
-    valFs:SetShadowOffset(2, -2)
+    -- the right of the fill instead. Its anchor changes per use, so clear the last one.
+    local valFs = row.val
+    valFs:ClearAllPoints()
     valFs:SetText(string.format("|cffe8d9a8%s|r", opts.valueText or tostring(opts.value)))
     local textW = valFs:GetStringWidth()
     local labelEnd = LABEL_PAD + fs:GetStringWidth() + LABEL_PAD
@@ -2738,24 +2785,14 @@ function EMRosterPageMixin:RenderStorageSection(content, y, profAssignments)
     local cw = content:GetWidth()
     local totalW = (cw > 20 and cw or 740) - 20
 
-    local row = self:Track(CreateFrame("Frame", nil, content))
+    local row = self:AcquireLabelRow(content, "storageRow", LABEL_COL_W, TEXT_TOP_PAD)
     row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
     row:SetSize(totalW, ROW_H)
 
-    local labelFS = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-    labelFS:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -TEXT_TOP_PAD)
-    labelFS:SetWidth(LABEL_COL_W)
-    labelFS:SetJustifyH("RIGHT")
-    labelFS:SetJustifyV("TOP")
-    labelFS:SetWordWrap(false)
+    local labelFS = row.labelFS
     labelFS:SetText("|cffdaa520Storage:|r")
 
-    local fs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-    fs:SetPoint("TOPLEFT", labelFS, "TOPRIGHT", 6, 0)
-    fs:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-    fs:SetJustifyH("LEFT")
-    fs:SetJustifyV("TOP")
-    fs:SetWordWrap(true)
+    local fs = row.fs
     fs:SetSpacing(6)
     fs:SetText(table.concat(parts, ", "))
 
@@ -2843,17 +2880,14 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
             local colW = 160
             local colCount = 0
             for _, m in ipairs(members) do
-                local btn = self:Track(CreateFrame("Button", nil, content))
+                local btn = self:AcquireNameButton(content)
                 btn:SetSize(colW, LINE_HEIGHT)
                 btn:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (colCount % 3) * colW, -y)
-                local fs = btn:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-                fs:SetAllPoints()
-                fs:SetJustifyH("LEFT")
                 local nameText = EmpireManager:ClassColoredName(m.entry)
                 if m.skill > 0 then
                     nameText = nameText .. string.format(" (%d)", m.skill)
                 end
-                fs:SetText(nameText)
+                btn.fs:SetText(nameText)
 
                 local cGuid, cEntry, memberProfKey = m.guid, m.entry, info.key
                 btn:SetScript("OnClick", function()
@@ -2948,7 +2982,7 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
                 y = y + LINE_HEIGHT
             end
         else
-            local fs = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+            local fs = self:AcquireText(content)
             fs:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
             fs:SetText("|cff999999No members|r")
             y = y + LINE_HEIGHT
@@ -2994,7 +3028,7 @@ function EMRosterPageMixin:BuildCategoriesContent(content, y)
         if #catAssignments > 0 then
             y = self:RenderStorageSection(content, y, catAssignments)
         else
-            local fs = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+            local fs = self:AcquireText(content)
             fs:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
             fs:SetText("|cff999999No storage assigned|r")
             y = y + LINE_HEIGHT
@@ -3039,7 +3073,9 @@ function EMRosterPageMixin:BuildRoleContent(content, y)
         -- Tooltip (reused from sidecar role-checkbox tooltips)
         local tipText = EmpireManager.ROLE_TOOLTIPS and EmpireManager.ROLE_TOOLTIPS[roleKey]
         if tipText and headingFS then
-            local hitRect = self:Track(CreateFrame("Frame", nil, content))
+            local hitRect = self._pool:Acquire("hitRect", function()
+                return CreateFrame("Frame", nil, content)
+            end)
             hitRect:SetAllPoints(headingFS)
             local roleLabel = display.label or roleKey
             hitRect:SetScript("OnEnter", function(f)
@@ -3076,13 +3112,10 @@ function EMRosterPageMixin:BuildRoleContent(content, y)
                     end
                 end
 
-                local btn = self:Track(CreateFrame("Button", nil, content))
+                local btn = self:AcquireNameButton(content)
                 btn:SetSize(colW, LINE_HEIGHT)
                 btn:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (colCount % maxCols) * colW, -y)
-                local fs = btn:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-                fs:SetAllPoints()
-                fs:SetJustifyH("LEFT")
-                fs:SetText(nameText)
+                btn.fs:SetText(nameText)
 
                 local cGuid, cEntry = m.guid, m.entry
                 btn:SetScript("OnClick", function()
@@ -3104,7 +3137,7 @@ function EMRosterPageMixin:BuildRoleContent(content, y)
                 y = y + LINE_HEIGHT
             end
         else
-            local fs = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+            local fs = self:AcquireText(content)
             fs:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
             fs:SetText("|cff555555None|r")
             y = y + LINE_HEIGHT
@@ -3128,13 +3161,10 @@ function EMRosterPageMixin:BuildRoleContent(content, y)
         local colW = 160
         local colCount = 0
         for _, m in ipairs(unassigned) do
-            local btn = self:Track(CreateFrame("Button", nil, content))
+            local btn = self:AcquireNameButton(content)
             btn:SetSize(colW, LINE_HEIGHT)
             btn:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (colCount % 3) * colW, -y)
-            local fs = btn:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-            fs:SetAllPoints()
-            fs:SetJustifyH("LEFT")
-            fs:SetText(EmpireManager:ClassColoredName(m.entry))
+            btn.fs:SetText(EmpireManager:ClassColoredName(m.entry))
 
             local cGuid, cEntry = m.guid, m.entry
             btn:SetScript("OnClick", function()
@@ -3156,7 +3186,7 @@ function EMRosterPageMixin:BuildRoleContent(content, y)
             y = y + LINE_HEIGHT
         end
     else
-        local fs = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local fs = self:AcquireText(content)
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
         fs:SetText("|cff555555(all characters assigned)|r")
         y = y + LINE_HEIGHT
@@ -3278,7 +3308,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
     end
 
     if #bankOrder == 0 then
-        local fs = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local fs = self:AcquireText(content)
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
         fs:SetText("No bank data yet. Open a bank on any character to record capacity.")
         return y + LINE_HEIGHT
@@ -3354,7 +3384,9 @@ function EMRosterPageMixin:BuildBankContent(content, y)
 
         -- Charbank headers are clickable - open sidecar for that character
         if bank.charGuid and bank.charEntry then
-            local btn = self:Track(CreateFrame("Button", nil, content))
+            local btn = self._pool:Acquire("headingButton", function()
+                return CreateFrame("Button", nil, content)
+            end)
             btn:SetAllPoints(headingFS)
             local cGuid = bank.charGuid
             btn:SetScript("OnClick", function()
@@ -3370,7 +3402,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             local free = agg.total - agg.used
             y = drawFillBar(headingFS, y, pct, agg.used, agg.total, free, bank.capSection and bank.capSection._scannedAt)
         else
-            local val = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+            local val = self:AcquireText(content)
             val:SetPoint("TOPLEFT", headingFS, "BOTTOMLEFT", 0, -2)
             val:SetText("No data")
             val:SetTextColor(0.5, 0.5, 0.5)
@@ -3426,16 +3458,14 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             local cw = content:GetWidth()
             local totalW = (cw > 20 and cw or 740) - 20
 
-            local row = self:Track(CreateFrame("Frame", nil, content))
+            local row = self:AcquireLabelRow(content, "tabRow", LABEL_COL_W, TEXT_TOP_PAD)
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
             row:SetSize(totalW, ROW_H)
+            -- Only rows with tab capacity show a tooltip; a reused row must not
+            -- keep the previous one's mouse capture.
+            row:EnableMouse(false)
 
-            local labelFS = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-            labelFS:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -TEXT_TOP_PAD)
-            labelFS:SetWidth(LABEL_COL_W)
-            labelFS:SetJustifyH("RIGHT")
-            labelFS:SetJustifyV("TOP")
-            labelFS:SetWordWrap(false)
+            local labelFS = row.labelFS
             labelFS:SetText(labelText)
 
             if tabCap and tabCap.total and tabCap.total > 0 then
@@ -3467,12 +3497,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
                 end)
             end
 
-            local fs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
-            fs:SetPoint("TOPLEFT", labelFS, "TOPRIGHT", 6, 0)
-            fs:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-            fs:SetJustifyH("LEFT")
-            fs:SetJustifyV("TOP")
-            fs:SetWordWrap(true)
+            local fs = row.fs
             fs:SetText(table.concat(parts, ", "))
 
             local contentH = math.max(fs:GetStringHeight(), labelFS:GetStringHeight())

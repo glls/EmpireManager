@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.9] - 2026-10-19
+
+### Fixed
+
+- **Triage no longer misses items after login.** Items still loading were hidden in Keep, so the vendor popup didn't open and Vendor All stayed greyed out. Triage now rescans once they load.
+- **Disenchant choices pick up TSM prices once TSM has loaded,** instead of using the fallback threshold for the rest of the session.
+- **Guild bank tabs no longer flicker** while EmpireManager reads them, and Triage tooltips show the full destination tab name.
+
+### Changed
+
+- **Lower memory use and smoother banking.** Windows reuse their rows instead of creating new ones, and moving items at the bank no longer rescans the whole bank each time.
+
 ## [1.2.8] - 2026-10-08
 
 ### Changed

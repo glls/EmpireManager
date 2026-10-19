@@ -2254,3 +2254,83 @@ EmpireManager.MSG = {
     HINT = "|cff4d99ff[Hint]|r",
     ERROR = "|cffff4444", -- prepend to [Triage]/[Bank] for errors; close with |r
 }
+
+-------------------------------------------------------------------------------
+-- Keyed widget pool
+-- WoW never frees a created Frame/FontString/Texture (it lives until /reload),
+-- so pages that rebuild on every refresh must reuse widgets instead of creating
+-- new ones. Widgets are pooled per `kind`: a kind is always built by the same
+-- factory, so a reused widget never carries sub-regions of a different shape.
+-- Release hides the widget, clears its anchors and mouse scripts; everything
+-- else (text, size, colors) the caller sets on every use. A factory can set
+-- `_poolKeepScripts` on a widget built from a Blizzard template that installs
+-- its own handlers (UIPanelButtonTemplate, dropdowns): release then leaves its
+-- scripts alone, and the caller rebinds its own handlers on every use.
+-------------------------------------------------------------------------------
+
+local POOL_CLEARED_SCRIPTS = { "OnClick", "OnEnter", "OnLeave" }
+
+local WidgetPoolMixin = {}
+
+-- Return a widget of `kind`, reusing a released one when available. `factory`
+-- runs only when the kind has none free, and must return the complete widget.
+function WidgetPoolMixin:Acquire(kind, factory)
+    local free = self.free[kind]
+    local obj = free and table.remove(free)
+    if not obj then
+        obj = factory()
+        obj._poolKind = kind
+    end
+    self.active[#self.active + 1] = obj
+    obj:Show()
+    return obj
+end
+
+-- Release every acquired widget back to its kind's free list.
+function WidgetPoolMixin:ReleaseAll()
+    local active = self.active
+    for i = #active, 1, -1 do
+        local obj = active[i]
+        active[i] = nil
+        obj:Hide()
+        obj:ClearAllPoints()
+        if obj.HasScript and not obj._poolKeepScripts then
+            for _, script in ipairs(POOL_CLEARED_SCRIPTS) do
+                if obj:HasScript(script) then
+                    obj:SetScript(script, nil)
+                end
+            end
+        end
+        local free = self.free[obj._poolKind]
+        if not free then
+            free = {}
+            self.free[obj._poolKind] = free
+        end
+        free[#free + 1] = obj
+    end
+end
+
+-- Pooled FontString of `template` on `parent`. A reused fontstring keeps
+-- whatever its last user set, so every acquire restores the template's own
+-- color, justify, wrapping and line spacing (recorded at creation).
+function WidgetPoolMixin:AcquireText(parent, template)
+    local fs = self:Acquire("text:" .. template, function()
+        local f = parent:CreateFontString(nil, "OVERLAY", template)
+        f._defR, f._defG, f._defB, f._defA = f:GetTextColor()
+        f._defJustifyH = f:GetJustifyH()
+        f._defWordWrap = f:CanWordWrap()
+        f._defNonSpaceWrap = f:CanNonSpaceWrap()
+        f._defSpacing = f:GetSpacing()
+        return f
+    end)
+    fs:SetTextColor(fs._defR, fs._defG, fs._defB, fs._defA)
+    fs:SetJustifyH(fs._defJustifyH)
+    fs:SetWordWrap(fs._defWordWrap)
+    fs:SetNonSpaceWrap(fs._defNonSpaceWrap)
+    fs:SetSpacing(fs._defSpacing)
+    return fs
+end
+
+function EmpireManager:CreateWidgetPool()
+    return Mixin({ free = {}, active = {} }, WidgetPoolMixin)
+end

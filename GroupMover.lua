@@ -80,7 +80,9 @@ function EmpireManager:GroupMoverSetItems(items)
         end
     end
     self._groupMoverSet = set
-    self._groupMoverPetSet = petSet
+    -- nil when the Group has no pets: an empty table is truthy, and the classifier
+    -- would then run a pet journal lookup for every item that misses `set`.
+    self._groupMoverPetSet = next(petSet) and petSet or nil
     local n = 0
     for _ in pairs(set) do
         n = n + 1

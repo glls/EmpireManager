@@ -1129,6 +1129,8 @@ function EmpireManager:CreateTriageOverlay()
     refreshBtn:SetScript("OnClick", function(_, button)
         -- A rescan clears the selected Group, as it clears skipped rows.
         self:ClearGroupMover()
+        -- Manual rescan: re-price disenchant candidates from TSM.
+        self:ClearTSMPriceCache()
         if button == "RightButton" then
             if self._triageActiveTab == "bags" then
                 self.triageSkippedItems = {}
@@ -2191,9 +2193,14 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
     actionFs:SetText(result.action)
     actionFs:SetTextColor(catInfo.r, catInfo.g, catInfo.b)
 
+    -- Half-highlight driver, assigned below. Runs only while hovered: OnEnter
+    -- installs it and OnLeave removes it, so idle rows cost nothing per frame.
+    local hoverUpdate
+
     -- Tooltip on hover - anchored to the right of the triage frame (Auctionator-style)
     -- so the row + cursor stay visible. Falls back to cursor anchor if the frame is gone.
     row:SetScript("OnEnter", function(self)
+        self:SetScript("OnUpdate", hoverUpdate)
         local triageF = EmpireManager.triageFrame
         if triageF and triageF:IsShown() then
             GameTooltip:SetOwner(triageF, "ANCHOR_NONE")
@@ -2305,7 +2312,10 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
             if not hasRuleBlock then
                 GameTooltip:AddLine(" ")
             end
-            local head, tail = result.action:match("^(.-)%s*%((.+)%)%s*$")
+            -- Greedy head + paren-free tail = the LAST "(...)" only. A lazy head split
+            -- at the first "(", so "Tab 4 (Housing) (may be full)" showed
+            -- "Housing) (may be full".
+            local head, tail = result.action:match("^(.*%S)%s*%(([^()]+)%)%s*$")
             if head and head ~= "" then
                 GameTooltip:AddLine(ColorActionRecipient(head), 1, 0.82, 0, true)
                 GameTooltip:AddLine(tail, 1, 0.82, 0, true)
@@ -2320,6 +2330,7 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
         end
     end)
     row:SetScript("OnLeave", function()
+        row:SetScript("OnUpdate", nil)
         GameTooltip:Hide()
         if divider then
             divider:Hide()
@@ -2336,7 +2347,7 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
     -- so the user can see which side a right-click will hit (left=skip item /
     -- keeplist, right=skip action). Throttled to ~30fps.
     local lastUpdate = 0
-    row:HookScript("OnUpdate", function(self, elapsed)
+    hoverUpdate = function(self, elapsed)
         lastUpdate = lastUpdate + elapsed
         if lastUpdate < 0.033 then
             return
@@ -2371,7 +2382,7 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
                 hlRight:Hide()
             end
         end
-    end)
+    end
 
     -- Click handling
     -- Keep List popup fires on any row whose action triage would perform (vendor, route, stash,
@@ -8275,36 +8286,6 @@ function EmpireManager:OpenGroupMoverPicker()
         f.FromDD:OverrideText(self:GroupMoverEndpointLabel(f._from) or "?")
         f.ToDD:OverrideText(self:GroupMoverEndpointLabel(f._to) or "?")
 
-        -- Both menus list all four endpoints, always. Only the entry matching the
-        -- Both dropdowns stay free; an invalid pair just disables Move. Disabling
-        -- options deadlocked the pair, and auto-flipping fought the user.
-        f.FromDD:SetupMenu(function(_, root)
-            for _, e in ipairs(self.GROUPMOVER_ENDPOINTS) do
-                root:CreateRadio(e.label, function()
-                    return f._from == e.key
-                end, function()
-                    f._from = e.key
-                    if f._refreshRoute then
-                        f._refreshRoute()
-                    end
-                end)
-            end
-        end)
-
-        f.ToDD:SetupMenu(function(_, root)
-            for _, e in ipairs(self.GROUPMOVER_ENDPOINTS) do
-                root:CreateRadio(e.label, function()
-                    return f._to == e.key
-                end, function()
-                    f._to = e.key
-                    f._toUserSet = true
-                    if f._refreshRoute then
-                        f._refreshRoute()
-                    end
-                end)
-            end
-        end)
-
         -- Warn when an end is a bank the character is not standing at.
         local warn
         if f._from == f._to then
@@ -8337,6 +8318,39 @@ function EmpireManager:OpenGroupMoverPicker()
         f.SelectButton._disabledReason = reason
         f.SelectButton:SetEnabled(reason == nil)
     end
+
+    -- Both menus list all four endpoints, always. Both dropdowns stay free; an
+    -- invalid pair just disables Move. Disabling options deadlocked the pair, and
+    -- auto-flipping fought the user. Set up once per open, not in RefreshRoute:
+    -- the radio predicates read f._from / f._to live, so the menus never need
+    -- rebuilding, and RefreshRoute runs on a 0.5s tick while the dialog is open.
+    f.FromDD:SetupMenu(function(_, root)
+        for _, e in ipairs(self.GROUPMOVER_ENDPOINTS) do
+            root:CreateRadio(e.label, function()
+                return f._from == e.key
+            end, function()
+                f._from = e.key
+                if f._refreshRoute then
+                    f._refreshRoute()
+                end
+            end)
+        end
+    end)
+
+    f.ToDD:SetupMenu(function(_, root)
+        for _, e in ipairs(self.GROUPMOVER_ENDPOINTS) do
+            root:CreateRadio(e.label, function()
+                return f._to == e.key
+            end, function()
+                f._to = e.key
+                f._toUserSet = true
+                if f._refreshRoute then
+                    f._refreshRoute()
+                end
+            end)
+        end
+    end)
+
     f._refreshRoute = RefreshRoute
 
     local function Rebuild()

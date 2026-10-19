@@ -19,6 +19,42 @@ local LINE_HEIGHT = 20
 -- still clamped to the TabSystem's min/max width. Applied after the inherited
 -- TabSystemButtonMixin, so this overrides its UpdateTabWidth.
 local TAB_EXTRA = 26 -- horizontal breathing room added to each label (the sidecar has spare width)
+
+-- A short tab ("Gold") is narrower than the art's two fixed-width end caps, so
+-- the caps overlapped and the middle piece (and its hover highlight) had no room:
+-- the highlight covered less than the tab. Without widening the tab, scale the
+-- caps down to fit. On top tabs the outer cap overhangs the button edge by 6px
+-- (7px for the active art), so the art spans width + overhang. Natural cap
+-- widths are captured once so a tab that grows gets its full caps back.
+local function FitTabCaps(tab, width)
+    local nat = tab._capNaturalW
+    if not nat then
+        nat = {
+            Left = tab.Left:GetWidth(),
+            Right = tab.Right:GetWidth(),
+            LeftActive = tab.LeftActive:GetWidth(),
+            RightActive = tab.RightActive:GetWidth(),
+        }
+        tab._capNaturalW = nat
+    end
+    local function fit(leftKey, rightKey, overhang, hlLeftKey, hlRightKey)
+        local l, r = nat[leftKey], nat[rightKey]
+        local span = width + overhang
+        if l + r > span then
+            local scale = span / (l + r)
+            l, r = l * scale, r * scale
+        end
+        tab[leftKey]:SetWidth(l)
+        tab[rightKey]:SetWidth(r)
+        if hlLeftKey then
+            tab[hlLeftKey]:SetWidth(l)
+            tab[hlRightKey]:SetWidth(r)
+        end
+    end
+    fit("Left", "Right", 6, "LeftHighlight", "RightHighlight")
+    fit("LeftActive", "RightActive", 7)
+end
+
 EMTopTabMixin = {}
 function EMTopTabMixin:UpdateTabWidth()
     local minW, maxW = self:GetTabSystem():GetTabWidthConstraints()
@@ -33,6 +69,7 @@ function EMTopTabMixin:UpdateTabWidth()
         textWidth = width - TAB_EXTRA
     end
     self.Text:SetWidth(textWidth or 0)
+    FitTabCaps(self, width)
     self:SetTabWidth(width)
 end
 
@@ -117,6 +154,10 @@ function EmpireManager:OpenSidecar(guid)
     end
 
     f._selectedTab = 1
+    -- Clear the guid before SetTab: its tab callback populates self._guid, which
+    -- here is still the previously shown character. The deferred Populate below
+    -- builds the new one.
+    f._guid = nil
     if f._tabIDs and f._tabIDs._area then
         f._tabIDs._area:SetTab(f._tabIDs[1])
     end
@@ -296,32 +337,12 @@ function EMSidecarMixin:Populate(guid)
 
     local content = self.ContentArea.ContentPanel
 
-    -- Clear previous content: hide + release closure references
-    if self._widgets then
-        for _, obj in ipairs(self._widgets) do
-            if obj.Hide then
-                obj:Hide()
-            end
-            if obj.HasScript then
-                if obj:HasScript("OnClick") then
-                    obj:SetScript("OnClick", nil)
-                end
-                if obj:HasScript("OnEnter") then
-                    obj:SetScript("OnEnter", nil)
-                end
-                if obj:HasScript("OnLeave") then
-                    obj:SetScript("OnLeave", nil)
-                end
-                if obj:HasScript("OnTextChanged") then
-                    obj:SetScript("OnTextChanged", nil)
-                end
-                if obj:HasScript("OnEnterPressed") then
-                    obj:SetScript("OnEnterPressed", nil)
-                end
-            end
-        end
+    -- Return last build's widgets to the pool; the Build* functions below reuse
+    -- them (WoW never frees a created widget, so recreating leaked every build).
+    if not self._pool then
+        self._pool = EmpireManager:CreateWidgetPool()
     end
-    self._widgets = {}
+    self._pool:ReleaseAll()
 
     local isCurrentChar = (guid == EmpireManager.playerGUID)
     local tab = self._selectedTab or 1
@@ -353,9 +374,29 @@ function EMSidecarMixin:Populate(guid)
     end
 end
 
-function EMSidecarMixin:Track(obj)
-    self._widgets[#self._widgets + 1] = obj
-    return obj
+-- Pooled plain text on `content` (the pool restores the template's look on reuse).
+function EMSidecarMixin:Text(content, template)
+    return self._pool:AcquireText(content, template or FONT_NORMAL)
+end
+
+-- Section divider (shared look across tabs).
+function EMSidecarMixin:Divider(content)
+    return self._pool:Acquire("divider", function()
+        local t = content:CreateTexture(nil, "ARTWORK")
+        t:SetAtlas("perks-divider-short", true)
+        return t
+    end)
+end
+
+-- Fixed-slot widget: exactly one per `slot` key (a given role's checkbox, a given
+-- option's box), so every build reuses it in the same place. Keeps its template
+-- scripts across releases; the build rebinds its own handlers on every use.
+function EMSidecarMixin:Slot(slot, frameType, content, template)
+    return self._pool:Acquire(slot, function()
+        local f = CreateFrame(frameType, nil, content, template)
+        f._poolKeepScripts = true
+        return f
+    end)
 end
 
 function EMSidecarMixin:SyncAssignments()
@@ -384,7 +425,7 @@ local ROLE_TOOLTIPS = EmpireManager.ROLE_TOOLTIPS
 
 function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
     -- Heading
-    local hdr = self:Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local hdr = self:Text(content, "GameFontNormalLarge")
     hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     hdr:SetText("|cffffd100Select your character roles|r")
     y = y + LINE_HEIGHT + 6
@@ -392,7 +433,7 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
     -- Auto button: rebuild Artisan/Gatherer prof selections to match the
     -- character's actual professions. Always enabled - the operation is
     -- idempotent and clicking it with no profs just clears stale selections.
-    local autoBtn = self:Track(CreateFrame("Button", nil, content, "UIPanelButtonTemplate"))
+    local autoBtn = self:Slot("autoBtn", "Button", content, "UIPanelButtonTemplate")
     autoBtn:SetSize(80, 22)
     autoBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     autoBtn:SetText("Auto")
@@ -432,11 +473,11 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
         end
 
         -- Role checkbox
-        local cb = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+        local cb = self:Slot("roleCB:" .. roleKey, "CheckButton", content, "UICheckButtonTemplate")
         cb:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         cb:SetChecked(isActive)
 
-        local cbLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local cbLabel = self:Text(content)
         cbLabel:SetPoint("LEFT", cb, "RIGHT", 2, 0)
         cbLabel:SetText(string.format(ICON16_FMT, display.icon, display.label or roleKey))
 
@@ -460,7 +501,7 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
             end)
             cb:SetScript("OnLeave", hideTip)
             -- Invisible hit-rect over the label so tooltip works on text too
-            local hitRect = self:Track(CreateFrame("Frame", nil, content))
+            local hitRect = self:Slot("roleHit:" .. roleKey, "Frame", content)
             hitRect:SetAllPoints(cbLabel)
             hitRect:SetScript("OnEnter", function(f)
                 showTip(f)
@@ -476,7 +517,7 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
 
             -- Profession multi-select dropdown (max 2)
             local profs = profsByCategory[display.profType]
-            local profDD = self:Track(CreateFrame("DropdownButton", nil, content, "WowStyle1DropdownTemplate"))
+            local profDD = self:Slot("roleDD:" .. roleKey, "DropdownButton", content, "WowStyle1DropdownTemplate")
             profDD:SetPoint("TOPLEFT", content, "TOPLEFT", 170, -(y - 2))
             profDD:SetWidth(220)
 
@@ -535,30 +576,13 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
     local RACE_NAMES = EmpireManager.RACE_NAMES
     local parent = content
 
-    -- Clear previous detail widgets
-    if self._detailWidgets then
-        for _, obj in ipairs(self._detailWidgets) do
-            if obj.Hide then
-                obj:Hide()
-            end
-        end
-    end
-    self._detailWidgets = {}
-
-    local function track(obj)
-        self._detailWidgets[#self._detailWidgets + 1] = obj
-        self._widgets[#self._widgets + 1] = obj
-        return obj
-    end
-
     -- Divider above every heading; the unlabelled Identity rows open the tab.
     local function addSection(label)
         y = y + 4
-        local sep = track(parent:CreateTexture(nil, "ARTWORK"))
-        sep:SetAtlas("perks-divider-short", true)
+        local sep = self:Divider(parent)
         sep:SetPoint("TOP", parent, "TOP", 0, -y)
         y = y + 16
-        local hdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+        local hdr = self:Text(parent, "GameFontNormalLarge")
         hdr:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
         hdr:SetText("|cffffd100" .. label .. "|r")
         y = y + LINE_HEIGHT + 6
@@ -569,11 +593,11 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
             return
         end
         if label ~= nil and label ~= "" then
-            local lbl = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+            local lbl = self:Text(parent)
             lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
             lbl:SetText(label)
         end
-        local val = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local val = self:Text(parent)
         -- label == nil → full-width row at x=12; label == "" → value column at x=120 (continuation row)
         local valX = (label == nil) and 12 or 120
         val:SetPoint("TOPLEFT", parent, "TOPLEFT", valX, -y)
@@ -684,25 +708,28 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
         local pct = used / total
 
         -- Label on the left
-        local lbl = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local lbl = self:Text(parent)
         lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
         lbl:SetText(label)
 
         -- Status bar (aligned with other addRow values at x=120)
-        local bar = track(CreateFrame("StatusBar", nil, parent))
-        bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
-        bar:SetMinMaxValues(0, 1)
+        local bar = self._pool:Acquire("statusBar", function()
+            local sb = CreateFrame("StatusBar", nil, parent)
+            sb:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+            sb:SetMinMaxValues(0, 1)
+            sb:SetSize(90, 10)
+            local bg = sb:CreateTexture(nil, "BACKGROUND")
+            bg:SetAllPoints()
+            bg:SetColorTexture(0.1, 0.1, 0.1, 0.8)
+            return sb
+        end)
         bar:SetValue(pct)
-        bar:SetSize(90, 10)
         bar:SetPoint("TOPLEFT", parent, "TOPLEFT", 120, -y)
         local r, g, b = colorForPct(pct)
         bar:SetStatusBarColor(r, g, b)
-        local bg = bar:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        bg:SetColorTexture(0.1, 0.1, 0.1, 0.8)
 
         -- Used/total text on the right
-        local val = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local val = self:Text(parent)
         val:SetPoint("LEFT", bar, "RIGHT", 6, 1)
         val:SetText(string.format("%d/%d  (%d%%)", used, total, math.floor(pct * 100 + 0.5)))
         val:SetTextColor(1, 1, 1)
@@ -735,31 +762,25 @@ end
 function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
     local parent = content
 
-    local function track(obj)
-        self._widgets[#self._widgets + 1] = obj
-        return obj
-    end
-
     -- Section header in the Details/Storage style (no leading divider on the first).
     local function addSection(label, first)
         if not first then
             y = y + 4
-            local sep = track(parent:CreateTexture(nil, "ARTWORK"))
-            sep:SetAtlas("perks-divider-short", true)
+            local sep = self:Divider(parent)
             sep:SetPoint("TOP", parent, "TOP", 0, -y)
             y = y + 16
         end
-        local hdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+        local hdr = self:Text(parent, "GameFontNormalLarge")
         hdr:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
         hdr:SetText("|cffffd100" .. label .. "|r")
         y = y + LINE_HEIGHT + 6
     end
 
     local function addRow(label, value)
-        local lbl = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local lbl = self:Text(parent)
         lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
         lbl:SetText(label)
-        local val = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local val = self:Text(parent)
         val:SetPoint("TOPLEFT", parent, "TOPLEFT", 120, -y)
         val:SetText(value)
         val:SetTextColor(1, 1, 1)
@@ -780,7 +801,7 @@ function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
     -- open (see EmpireManager:MaybeWarbandGoldTransfer), gated by the General
     -- "Auto transfer gold at Warband Bank" option.
     addSection("Auto-Balance")
-    local hint = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local hint = self:Text(parent)
     hint:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
     hint:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
     hint:SetJustifyH("LEFT")
@@ -810,10 +831,10 @@ function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
     end
 
     local function addGoldLimitRow(label, field)
-        local lbl = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local lbl = self:Text(parent)
         lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
         lbl:SetText(label)
-        local box = track(CreateFrame("EditBox", nil, parent, "InputBoxTemplate"))
+        local box = self:Slot("goldBox:" .. field, "EditBox", parent, "InputBoxTemplate")
         box:SetSize(80, 20)
         box:SetPoint("TOPLEFT", parent, "TOPLEFT", 150, -y + 2)
         box:SetAutoFocus(false)
@@ -824,7 +845,7 @@ function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
         box:SetTextInsets(5, 8, 0, 0)
         local prevGold = math.floor((entry[field] or 0) / 10000)
         box:SetText(prevGold > 0 and tostring(prevGold) or "")
-        local goldIcon = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        local goldIcon = self:Text(parent)
         goldIcon:SetPoint("LEFT", box, "RIGHT", 4, 0)
         goldIcon:SetText(GOLD_ICON)
         box:SetScript("OnEnterPressed", function(self)
@@ -899,16 +920,16 @@ end
 
 function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     -- Dashboard section
-    local dashHdr = self:Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local dashHdr = self:Text(content, "GameFontNormalLarge")
     dashHdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     dashHdr:SetText("|cffffd100Dashboard|r")
     y = y + LINE_HEIGHT + 6
 
     -- Sort order
-    local sortLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local sortLabel = self:Text(content)
     sortLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
     sortLabel:SetText("Sort Order (#)")
-    local sortTip = self:Track(CreateFrame("Frame", nil, content))
+    local sortTip = self:Slot("sortTip", "Frame", content)
     sortTip:SetAllPoints(sortLabel)
     sortTip:SetScript("OnEnter", function(f)
         GameTooltip:SetOwner(f, "ANCHOR_CURSOR_RIGHT")
@@ -927,7 +948,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         GameTooltip:Hide()
     end)
 
-    local sortBox = self:Track(CreateFrame("EditBox", nil, content, "InputBoxTemplate"))
+    local sortBox = self:Slot("sortBox", "EditBox", content, "InputBoxTemplate")
     sortBox:SetSize(60, 20)
     sortBox:SetPoint("LEFT", sortLabel, "LEFT", 120, 0)
     sortBox:SetAutoFocus(false)
@@ -968,13 +989,12 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
 
     -- Separator
     y = y + 4
-    local sep1 = self:Track(content:CreateTexture(nil, "ARTWORK"))
-    sep1:SetAtlas("perks-divider-short", true)
+    local sep1 = self:Divider(content)
     sep1:SetPoint("TOP", content, "TOP", 0, -y)
     y = y + 16
 
     -- Role Behavior section header
-    local roleHdr = self:Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local roleHdr = self:Text(content, "GameFontNormalLarge")
     roleHdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     roleHdr:SetText("|cffffd100Role Behavior|r")
     y = y + LINE_HEIGHT + 6
@@ -982,12 +1002,12 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     -- Auctioneer: Keep BoE
     local asnData = entry.assignments or {}
     local hasAuctioneer = asnData.auctioneer
-    local ahCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    local ahCB = self:Slot("ahCB", "CheckButton", content, "UICheckButtonTemplate")
     ahCB:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     ahCB:SetChecked(entry.auctioneerKeepBOE ~= false)
     ahCB:SetEnabled(hasAuctioneer)
     ahCB:SetMotionScriptsWhileDisabled(true)
-    local ahLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local ahLabel = self:Text(content)
     ahLabel:SetPoint("LEFT", ahCB, "RIGHT", 2, 0)
     ahLabel:SetText("Auctioneer: Keep BoE Equipment")
     ahLabel:SetTextColor(hasAuctioneer and 1 or 0.5, hasAuctioneer and 1 or 0.5, hasAuctioneer and 1 or 0.5)
@@ -1015,7 +1035,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showAhTip(btn)
     end)
     ahCB:SetScript("OnLeave", hideAhTip)
-    local ahHit = self:Track(CreateFrame("Frame", nil, content))
+    local ahHit = self:Slot("ahHit", "Frame", content)
     ahHit:SetAllPoints(ahLabel)
     ahHit:SetScript("OnEnter", function(f)
         showAhTip(f)
@@ -1030,12 +1050,12 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
 
     -- Enchanter: Keep for DE
     local hasEnchanting = asnData.artisan and asnData.artisan.enchanting
-    local deCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    local deCB = self:Slot("deCB", "CheckButton", content, "UICheckButtonTemplate")
     deCB:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     deCB:SetChecked(entry.enchanterKeepDE ~= false)
     deCB:SetEnabled(hasEnchanting)
     deCB:SetMotionScriptsWhileDisabled(true)
-    local deLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local deLabel = self:Text(content)
     deLabel:SetPoint("LEFT", deCB, "RIGHT", 2, 0)
     deLabel:SetText("Enchanter: Keep Vendor Gear for DE")
     deLabel:SetTextColor(hasEnchanting and 1 or 0.5, hasEnchanting and 1 or 0.5, hasEnchanting and 1 or 0.5)
@@ -1063,7 +1083,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showDeTip(btn)
     end)
     deCB:SetScript("OnLeave", hideDeTip)
-    local deHit = self:Track(CreateFrame("Frame", nil, content))
+    local deHit = self:Slot("deHit", "Frame", content)
     deHit:SetAllPoints(deLabel)
     deHit:SetScript("OnEnter", function(f)
         showDeTip(f)
@@ -1078,12 +1098,12 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
 
     -- Keep own profession mats in character bank
     local hasAnyProf = (asnData.artisan and next(asnData.artisan)) or (asnData.gatherer and next(asnData.gatherer))
-    local profMatCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    local profMatCB = self:Slot("profMatCB", "CheckButton", content, "UICheckButtonTemplate")
     profMatCB:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     profMatCB:SetChecked(entry.keepOwnProfMatsInBank == true)
     profMatCB:SetEnabled(hasAnyProf)
     profMatCB:SetMotionScriptsWhileDisabled(true)
-    local profMatLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local profMatLabel = self:Text(content)
     profMatLabel:SetPoint("LEFT", profMatCB, "RIGHT", 2, 0)
     profMatLabel:SetText("Keep Profession materials in Character Bank")
     profMatLabel:SetTextColor(hasAnyProf and 1 or 0.5, hasAnyProf and 1 or 0.5, hasAnyProf and 1 or 0.5)
@@ -1111,7 +1131,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showProfMatTip(btn)
     end)
     profMatCB:SetScript("OnLeave", hideProfMatTip)
-    local profMatHit = self:Track(CreateFrame("Frame", nil, content))
+    local profMatHit = self:Slot("profMatHit", "Frame", content)
     profMatHit:SetAllPoints(profMatLabel)
     profMatHit:SetScript("OnEnter", function(f)
         showProfMatTip(f)
@@ -1125,12 +1145,12 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     y = y + 28
 
     -- Keep own profession mats in bags
-    local bagMatCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    local bagMatCB = self:Slot("bagMatCB", "CheckButton", content, "UICheckButtonTemplate")
     bagMatCB:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     bagMatCB:SetChecked(entry.keepOwnProfMatsInBags == true)
     bagMatCB:SetEnabled(hasAnyProf)
     bagMatCB:SetMotionScriptsWhileDisabled(true)
-    local bagMatLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local bagMatLabel = self:Text(content)
     bagMatLabel:SetPoint("LEFT", bagMatCB, "RIGHT", 2, 0)
     bagMatLabel:SetText("Keep Profession materials in Bags")
     bagMatLabel:SetTextColor(hasAnyProf and 1 or 0.5, hasAnyProf and 1 or 0.5, hasAnyProf and 1 or 0.5)
@@ -1155,7 +1175,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showBagMatTip(btn)
     end)
     bagMatCB:SetScript("OnLeave", hideProfMatTip)
-    local bagMatHit = self:Track(CreateFrame("Frame", nil, content))
+    local bagMatHit = self:Slot("bagMatHit", "Frame", content)
     bagMatHit:SetAllPoints(bagMatLabel)
     bagMatHit:SetScript("OnEnter", function(f)
         showBagMatTip(f)
@@ -1177,13 +1197,13 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     y = y + 28
 
     -- Sub-option: only keep latest-expansion mats in bags
-    bagMatLatestCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    bagMatLatestCB = self:Slot("bagMatLatestCB", "CheckButton", content, "UICheckButtonTemplate")
     bagMatLatestCB:SetPoint("TOPLEFT", content, "TOPLEFT", 28, -y)
     bagMatLatestCB:SetChecked(entry.keepOwnProfMatsInBagsLatestOnly == true)
     local bagMatLatestEnabled = hasAnyProf and (entry.keepOwnProfMatsInBags == true)
     bagMatLatestCB:SetEnabled(bagMatLatestEnabled)
     bagMatLatestCB:SetMotionScriptsWhileDisabled(true)
-    bagMatLatestLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    bagMatLatestLabel = self:Text(content)
     bagMatLatestLabel:SetPoint("LEFT", bagMatLatestCB, "RIGHT", 2, 0)
     bagMatLatestLabel:SetText("Latest expansion only")
     bagMatLatestLabel:SetTextColor(
@@ -1217,7 +1237,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     bagMatLatestCB:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
-    local bagMatLatestHit = self:Track(CreateFrame("Frame", nil, content))
+    local bagMatLatestHit = self:Slot("bagMatLatestHit", "Frame", content)
     bagMatLatestHit:SetAllPoints(bagMatLatestLabel)
     bagMatLatestHit:SetScript("OnEnter", function(f)
         showBagMatLatestTip(f)
@@ -1233,10 +1253,10 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     y = y + 28
 
     -- Stash Old Quest items to character bank
-    local questCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    local questCB = self:Slot("questCB", "CheckButton", content, "UICheckButtonTemplate")
     questCB:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     questCB:SetChecked(entry.stashOldQuestItems == true)
-    local questLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local questLabel = self:Text(content)
     questLabel:SetPoint("LEFT", questCB, "RIGHT", 2, 0)
     questLabel:SetText("Stash Old Quest items in Character Bank")
     local function showQuestTip(anchor)
@@ -1259,7 +1279,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showQuestTip(btn)
     end)
     questCB:SetScript("OnLeave", hideQuestTip)
-    local questHit = self:Track(CreateFrame("Frame", nil, content))
+    local questHit = self:Slot("questHit", "Frame", content)
     questHit:SetAllPoints(questLabel)
     questHit:SetScript("OnEnter", function(f)
         showQuestTip(f)
@@ -1273,10 +1293,10 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     y = y + 28
 
     -- Skip all Storage Rules for this character
-    local skipCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    local skipCB = self:Slot("skipCB", "CheckButton", content, "UICheckButtonTemplate")
     skipCB:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     skipCB:SetChecked(entry.ignoreStorageRules == true)
-    local skipLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    local skipLabel = self:Text(content)
     skipLabel:SetPoint("LEFT", skipCB, "RIGHT", 2, 0)
     skipLabel:SetText("Skip All Storage Rules")
     local function showSkipTip(anchor)
@@ -1299,7 +1319,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showSkipTip(btn)
     end)
     skipCB:SetScript("OnLeave", hideSkipTip)
-    local skipHit = self:Track(CreateFrame("Frame", nil, content))
+    local skipHit = self:Slot("skipHit", "Frame", content)
     skipHit:SetAllPoints(skipLabel)
     skipHit:SetScript("OnEnter", function(f)
         showSkipTip(f)
@@ -1314,18 +1334,17 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
 
     -- Separator
     y = y + 4
-    local sep2 = self:Track(content:CreateTexture(nil, "ARTWORK"))
-    sep2:SetAtlas("perks-divider-short", true)
+    local sep2 = self:Divider(content)
     sep2:SetPoint("TOP", content, "TOP", 0, -y)
     y = y + 16
 
     -- Danger Zone
-    local dangerHdr = self:Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local dangerHdr = self:Text(content, "GameFontNormalLarge")
     dangerHdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     dangerHdr:SetText("|cffff4444Danger Zone|r")
     y = y + LINE_HEIGHT + 6
 
-    local deleteBtn = self:Track(CreateFrame("Button", nil, content, "UIPanelButtonTemplate"))
+    local deleteBtn = self:Slot("deleteBtn", "Button", content, "UIPanelButtonTemplate")
     deleteBtn:SetSize(160, 24)
     deleteBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     deleteBtn:SetText("Remove from Roster")
