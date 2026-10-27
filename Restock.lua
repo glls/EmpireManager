@@ -254,7 +254,9 @@ end
 -- Build the deposit plan: ordered list of { ctx, destType, itemID, name, move } for
 -- every restock entry reachable now that is below its floor, in restockList priority
 -- order. `move` is the exact deficit we can cover from bags (never exceeds target).
-function EmpireManager:ComputeRestockPlan()
+-- `skipped` (optional) holds rows the user dismissed in the confirm dialog, as
+-- skipped[entry][srcType or "deposit"] = true. Lives for one run only.
+function EmpireManager:ComputeRestockPlan(skipped)
     local list = self.db.global.restockList
     if not list or #list == 0 then
         return {}
@@ -262,6 +264,7 @@ function EmpireManager:ComputeRestockPlan()
     local plan = {}
     for _, entry in ipairs(list) do
         if entry.itemID and entry.target and entry.target > 0 and EntryReachableNow(self, entry) then
+            local skip = skipped and skipped[entry]
             if entry.dest == "bags" then
                 -- Withdraw side: the deficit is in BAGS and the supply is in the
                 -- open bank(s). One plan item per supplying bank, in priority
@@ -275,7 +278,9 @@ function EmpireManager:ComputeRestockPlan()
                     if srcCtx then
                         local available = CountInBankContainers(srcCtx, entry.itemID)
                         local move = math.min(deficit, available)
-                        if move > 0 then
+                        -- A dismissed source still consumes its share of the deficit,
+                        -- so the next bank does not silently cover it instead.
+                        if move > 0 and not (skip and skip[srcType]) then
                             plan[#plan + 1] = {
                                 ctx = srcCtx,
                                 withdraw = true,
@@ -286,6 +291,8 @@ function EmpireManager:ComputeRestockPlan()
                                 move = move,
                                 entry = entry,
                             }
+                        end
+                        if move > 0 then
                             deficit = deficit - move
                         end
                     end
@@ -298,7 +305,7 @@ function EmpireManager:ComputeRestockPlan()
                     if deficit > 0 then
                         local have = self:CountItemInBags(entry.itemID)
                         local move = math.min(deficit, have)
-                        if move > 0 then
+                        if move > 0 and not (skip and skip.deposit) then
                             plan[#plan + 1] = {
                                 ctx = ctx,
                                 destType = entry.dest,
@@ -782,15 +789,59 @@ local function DestHeaderText(self, item)
     return item.destType or "?"
 end
 
+-- Plan-row identity that survives a recompute: the rule plus which bank a
+-- withdraw comes from (one bags rule can split across two banks).
+local function SkipKey(item)
+    return item.withdraw and item.srcType or "deposit"
+end
+
+-- Recompute the open confirm dialog's plan from live counts (minus dismissed
+-- rows) and redraw it in place, keeping the scroll position. Closes the dialog
+-- when nothing is left to move. Used by right-click dismiss and by bag/bank
+-- changes while the dialog is open.
+local function RefreshRestockDialog(addon)
+    local f = EmpireManagerRestockConfirmDialog
+    if not (f and f:IsShown()) then
+        return
+    end
+    local sf = f.ScrollFrame
+    -- A hovered row is about to be rebound to another item; drop its tooltip.
+    local owner = GameTooltip:GetOwner()
+    if owner and owner:GetParent() == sf.Content then
+        GameTooltip:Hide()
+    end
+    local plan = addon:ComputeRestockPlan(f._skipped)
+    if #plan == 0 then
+        f:Hide()
+        return
+    end
+    local scroll = sf:GetVerticalScroll()
+    addon:ShowRestockConfirmDialog(plan, f._skipped)
+    sf:SetVerticalScroll(math.min(scroll, math.max(0, sf.Content:GetHeight() - sf:GetHeight())))
+end
+
 -- Custom confirm dialog: scrollable list of top-ups grouped by destination, each
 -- row rendered with quality color + item icon + hover tooltip. Replaces the old
 -- StaticPopup which capped at 6 lines and had no colors/icons/destinations.
-function EmpireManager:ShowRestockConfirmDialog(plan)
+-- Right-click a row (or a section header) to dismiss it from this transfer;
+-- `skipped` carries those dismissals through redraws and into the run. While
+-- open, the dialog follows bag and guild bank changes (RefreshRestockDialog).
+function EmpireManager:ShowRestockConfirmDialog(plan, skipped)
+    skipped = skipped or {}
     local f = EmpireManagerRestockConfirmDialog
     if not f then
         -- Defensive fallback: XML frame missing -> just execute the plan.
         self:RunRestockPlan(plan)
         return
+    end
+    f._skipped = skipped
+
+    local function Dismiss(items)
+        for _, it in ipairs(items) do
+            skipped[it.entry] = skipped[it.entry] or {}
+            skipped[it.entry][SkipKey(it)] = true
+        end
+        RefreshRestockDialog(self)
     end
 
     if not f._initialized then
@@ -805,29 +856,57 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
         f:SetBackdropColor(0.06, 0.06, 0.09, 0.95)
         f:RegisterForDrag("LeftButton")
         f.ScrollFrame:SetScrollChild(f.ScrollFrame.Content)
+        f._pool = EmpireManager:CreateWidgetPool()
+
+        -- Action buttons are built once; OK rebinds its OnClick per show because
+        -- the handler captures that show's plan.
+        f.OkButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.OkButton:SetSize(100, 28)
+        f.OkButton:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 18)
+        f.CancelButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.CancelButton:SetSize(100, 28)
+        f.CancelButton:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 18)
+        f.CancelButton:SetText("Cancel")
+        f.CancelButton:SetScript("OnClick", function()
+            f:Hide()
+        end)
+        f.CloseButton:SetScript("OnClick", function()
+            f:Hide()
+        end)
+
+        -- Live update: only listen while shown. Bank moves made by this character
+        -- also change bags, so BAG_UPDATE_DELAYED covers char/warband banks;
+        -- GUILDBANKBAGSLOTS_CHANGED adds other members' guild bank moves.
+        -- Debounced so a burst of events redraws once.
+        f:SetScript("OnEvent", function()
+            if f._refreshTimer then
+                f._refreshTimer:Cancel()
+            end
+            f._refreshTimer = C_Timer.NewTimer(0.3, function()
+                f._refreshTimer = nil
+                RefreshRestockDialog(self)
+            end)
+        end)
+        f:HookScript("OnShow", function()
+            f:RegisterEvent("BAG_UPDATE_DELAYED")
+            f:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED")
+        end)
+        f:HookScript("OnHide", function()
+            f:UnregisterAllEvents()
+            if f._refreshTimer then
+                f._refreshTimer:Cancel()
+                f._refreshTimer = nil
+            end
+        end)
         f._initialized = true
     end
 
     f.TitleText:SetText("EmpireManager - Confirm Restock")
 
-    -- Clear previous widgets (rows and section headers pooled implicitly by GC-
-    -- friendly hide-and-forget; same pattern the vendor dialog uses).
-    if f._widgets then
-        for _, w in ipairs(f._widgets) do
-            if w.Hide then
-                w:Hide()
-            end
-            if w.SetScript then
-                pcall(w.SetScript, w, "OnEnter", nil)
-                pcall(w.SetScript, w, "OnLeave", nil)
-            end
-        end
-    end
-    f._widgets = {}
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
-    end
+    -- Return the last show's rows and headers to the pool; the build below reuses
+    -- them (WoW never frees a created widget, so recreating leaked every show).
+    local pool = f._pool
+    pool:ReleaseAll()
 
     local sf = f.ScrollFrame
     local content = sf.Content
@@ -841,7 +920,7 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
     local y = 8
 
     -- Header
-    local hdr = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local hdr = pool:AcquireText(content, "GameFontNormalLarge")
     hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     -- A plan can mix directions (deposit to a bank, withdraw to bags), so the
     -- header, sub-header and action button all adapt to what it actually contains.
@@ -886,7 +965,7 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
     y = y + 26
 
     -- Sub-header
-    local sub = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+    local sub = pool:AcquireText(content, "GameFontHighlight")
     sub:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     -- "rule" is the word the user sees in the Restock tab; "floor" is internal.
     -- A plain label, not a dangling "To meet ..." purpose clause with no main verb.
@@ -917,33 +996,57 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
 
     for _, headerText in ipairs(groupOrder) do
         y = y + 4 -- spacer above each group
-        local grp = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+        local groupItems = groups[headerText]
+        local grp = pool:Acquire("group", function()
+            local b = CreateFrame("Button", nil, content)
+            b:RegisterForClicks("RightButtonUp")
+            b.Text = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            b.Text:SetPoint("LEFT", b, "LEFT", 0, 0)
+            return b
+        end)
+        grp:SetSize(content:GetWidth() - 8, 18)
         grp:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-        grp:SetText("|cffffcc00" .. headerText .. "|r")
+        grp.Text:SetText("|cffffcc00" .. headerText .. "|r")
+        grp:SetScript("OnClick", function()
+            Dismiss(groupItems)
+        end)
+        grp:SetScript("OnEnter", function(btn)
+            GameTooltip:SetOwner(btn, "ANCHOR_CURSOR_RIGHT")
+            GameTooltip:AddLine("Right-click: skip this section", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        grp:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
         y = y + 18
 
-        for _, item in ipairs(groups[headerText]) do
+        for _, item in ipairs(groupItems) do
             -- Row: icon + "N x colored name"
             local _, itemLink, quality, _, _, _, _, _, _, icon = C_Item.GetItemInfo(item.itemID)
             icon = icon or 134400
-            local btn = Track(CreateFrame("Button", nil, content))
+            local btn = pool:Acquire("row", function()
+                local b = CreateFrame("Button", nil, content)
+                b:RegisterForClicks("RightButtonUp")
+                b.Icon = b:CreateTexture(nil, "ARTWORK")
+                b.Icon:SetSize(16, 16)
+                b.Icon:SetPoint("LEFT", b, "LEFT", 0, 0)
+                b.Text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+                b.Text:SetPoint("LEFT", b.Icon, "RIGHT", 6, 0)
+                b.Text:SetPoint("RIGHT", b, "RIGHT", 0, 0)
+                b.Text:SetJustifyH("LEFT")
+                return b
+            end)
             btn:SetSize(content:GetWidth() - 16, 18)
             btn:SetPoint("TOPLEFT", content, "TOPLEFT", 16, -y)
-
-            local iconTex = btn:CreateTexture(nil, "ARTWORK")
-            iconTex:SetSize(16, 16)
-            iconTex:SetPoint("LEFT", btn, "LEFT", 0, 0)
-            iconTex:SetTexture(icon)
-
-            local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            fs:SetPoint("LEFT", iconTex, "RIGHT", 6, 0)
-            fs:SetPoint("RIGHT", btn, "RIGHT", 0, 0)
-            fs:SetJustifyH("LEFT")
+            btn.Icon:SetTexture(icon)
             local qc = quality and ITEM_QUALITY_COLORS[quality]
             local coloredName = (qc and qc.hex or "|cffffffff") .. (item.name or "?") .. "|r"
-            fs:SetText(string.format("%d x %s", item.move, coloredName))
+            btn.Text:SetText(string.format("%d x %s", item.move, coloredName))
 
             local hoverLink = itemLink or item.itemID
+            btn:SetScript("OnClick", function()
+                Dismiss({ item })
+            end)
             btn:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
                 if type(hoverLink) == "string" then
@@ -951,6 +1054,7 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
                 else
                     GameTooltip:SetItemByID(hoverLink)
                 end
+                GameTooltip:AddLine("Right-click: skip this item", 1, 1, 1, true)
                 GameTooltip:Show()
             end)
             btn:SetScript("OnLeave", function()
@@ -966,42 +1070,10 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
     local desiredHeight = math.min(math.max(200, y + 120), 500)
     f:SetHeight(desiredHeight)
 
-    -- Rebuild the two action buttons every time (their closures capture `plan`).
-    if f._btns then
-        for _, btn in ipairs(f._btns) do
-            btn:Hide()
-        end
-    end
-    f._btns = {}
-
-    local intentionalClose = false
-
-    local okBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    okBtn:SetSize(100, 28)
-    okBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 18)
-    okBtn:SetText((hasWithdraw and not hasDeposit) and "Take Out" or (hasWithdraw and "Move" or "Deposit"))
-    okBtn:SetScript("OnClick", function()
-        intentionalClose = true
+    f.OkButton:SetText((hasWithdraw and not hasDeposit) and "Take Out" or (hasWithdraw and "Move" or "Deposit"))
+    f.OkButton:SetScript("OnClick", function()
         f:Hide()
-        self:RunRestockPlan(plan)
-    end)
-    f._btns[1] = okBtn
-
-    local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    cancelBtn:SetSize(100, 28)
-    cancelBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 18)
-    cancelBtn:SetText("Cancel")
-    cancelBtn:SetScript("OnClick", function()
-        intentionalClose = true
-        f:Hide()
-    end)
-    f._btns[2] = cancelBtn
-
-    f.CloseButton:SetScript("OnClick", function()
-        if intentionalClose then
-            return
-        end
-        f:Hide()
+        self:RunRestockPlan(plan, nil, skipped)
     end)
 
     -- Reset scroll to top so a fresh plan doesn't open mid-list from a prior use.
@@ -1019,16 +1091,17 @@ local RESTOCK_RECONCILE_PASSES = 2
 -- So the authority is the state after everything settles: recompute the plan and, if a
 -- reachable rule is still short while progress was being made, run again. Anything
 -- still unmet after that is reported instead of being silently left short.
-function EmpireManager:RunRestockPlan(plan, pass)
+-- `skipped` keeps rows dismissed in the confirm dialog out of the reconcile passes.
+function EmpireManager:RunRestockPlan(plan, pass, skipped)
     pass = pass or 1
     self:ExecuteRestockPlan(plan, function(moved)
         C_Timer.After(0.6, function()
-            local remaining = self:ComputeRestockPlan()
+            local remaining = self:ComputeRestockPlan(skipped)
             if #remaining == 0 then
                 return -- every reachable rule is satisfied
             end
             if moved > 0 and pass <= RESTOCK_RECONCILE_PASSES then
-                self:RunRestockPlan(remaining, pass + 1)
+                self:RunRestockPlan(remaining, pass + 1, skipped)
                 return
             end
             local parts = {}

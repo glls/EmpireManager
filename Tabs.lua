@@ -520,6 +520,7 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         f:SetBackdropColor(0.06, 0.06, 0.09, 0.95)
         f:RegisterForDrag("LeftButton")
         f.ScrollFrame:SetScrollChild(f.ScrollFrame.Content)
+        f._pool = EmpireManager:CreateWidgetPool()
         f._initialized = true
     end
     f.TitleText:SetText("EmpireManager - Remap Import")
@@ -529,26 +530,36 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
     local index = 1
     local self_ = self
 
+    -- Every step reuses pooled widgets (WoW never frees a created widget, so
+    -- recreating them leaked on every step).
     local function ClearBody()
-        if f._widgets then
-            for _, w in ipairs(f._widgets) do
-                if w.Hide then w:Hide() end
-                if w.SetScript and w.HasScript then
-                    if w:HasScript("OnClick") then w:SetScript("OnClick", nil) end
-                    if w:HasScript("OnEnter") then w:SetScript("OnEnter", nil) end
-                    if w:HasScript("OnLeave") then w:SetScript("OnLeave", nil) end
-                end
-            end
-        end
-        f._widgets = {}
-        if f._btns then
-            for _, b in ipairs(f._btns) do b:Hide() end
-        end
-        f._btns = {}
+        f._pool:ReleaseAll()
     end
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
+
+    -- Pooled text on the scroll child. Width and indented wrap are not part of
+    -- the pool's reset, and only some callers set them, so reset them here
+    -- (width 0 = unconstrained, as on a fresh fontstring).
+    local function Text(template, width)
+        local fs = f._pool:AcquireText(f.ScrollFrame.Content, template)
+        fs:SetWidth(width or 0)
+        if fs.SetIndentedWordWrap then
+            fs:SetIndentedWordWrap(false)
+        end
+        return fs
+    end
+
+    -- Bottom buttons, one per role. Each step re-anchors, resizes and rebinds
+    -- the ones it shows; the rest stay released (hidden).
+    local function BottomButton(slot, text, width)
+        local b = f._pool:Acquire(slot, function()
+            local btn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+            btn._poolKeepScripts = true
+            return btn
+        end)
+        b:SetSize(width, 22)
+        b:SetText(text)
+        b:SetEnabled(true)
+        return b
     end
 
     -- Build the final rule list from decisions + readyRules.
@@ -643,12 +654,12 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         local origName = groupKey == "<unspecified>"
             and ("|cffff8800" .. unspecifiedLabel .. "|r")
             or ("|cffffffff" .. groupKey .. "|r")
-        local toFs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+        local toFs = Text("GameFontNormalLarge")
         toFs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         toFs:SetText(origName)
         y = y + 26
 
-        local countFs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local countFs = Text("GameFontHighlight")
         countFs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         local n = #group.rules
         countFs:SetText(string.format(refLine, n, n == 1 and "" or "s"))
@@ -656,9 +667,8 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         y = y + 4
 
         for _, r in ipairs(group.rules) do
-            local row = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+            local row = Text("GameFontHighlight", contentW - 24)
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 16, -y)
-            row:SetWidth(contentW - 24)
             row:SetJustifyH("LEFT")
             if row.SetIndentedWordWrap then
                 row:SetIndentedWordWrap(true)
@@ -670,7 +680,7 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         end
         y = y + 8
 
-        local pickLabel = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+        local pickLabel = Text("GameFontNormal")
         pickLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         pickLabel:SetText("Remap to:")
         pickLabel:SetTextColor(1, 0.82, 0)
@@ -699,7 +709,14 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
             end
         end
 
-        local dd = Track(CreateFrame("DropdownButton", nil, content, "WowStyle1DropdownTemplate"))
+        -- SetDefaultText, SetupMenu and the scroll-to-selected callback are all
+        -- redone on every use (the callback is keyed by the dropdown as owner,
+        -- so it replaces the previous step's instead of stacking).
+        local dd = f._pool:Acquire("dropdown", function()
+            local d = CreateFrame("DropdownButton", nil, content, "WowStyle1DropdownTemplate")
+            d._poolKeepScripts = true
+            return d
+        end)
         dd:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         dd:SetSize(contentW - 24, 26)
         if dd.SetDefaultText then
@@ -743,9 +760,8 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         y = y + 30
 
         if candidateCount == 0 then
-            local empty = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+            local empty = Text("GameFontHighlight", contentW - 16)
             empty:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-            empty:SetWidth(contentW - 16)
             empty:SetJustifyH("LEFT")
             if isGuild then
                 empty:SetText("|cffff8800No guilds in your roster to remap to. Log in to a character in a guild first, then re-import.|r")
@@ -758,31 +774,23 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         content:SetHeight(y + 10)
 
         -- Bottom buttons: Cancel (left) | Skip (center) | Next (right)
-        local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        cancelBtn:SetSize(100, 22)
+        local cancelBtn = BottomButton("cancelBtn", "Cancel", 100)
         cancelBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 20)
-        cancelBtn:SetText("Cancel")
         cancelBtn:SetScript("OnClick", function()
             CloseDialog()
             if onCommit then onCommit(false, nil, 0, 0) end
         end)
-        f._btns[1] = cancelBtn
 
-        local skipBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        skipBtn:SetSize(100, 22)
+        local skipBtn = BottomButton("skipBtn", "Skip", 100)
         skipBtn:SetPoint("BOTTOM", f, "BOTTOM", 0, 20)
-        skipBtn:SetText("Skip")
         skipBtn:SetScript("OnClick", function()
             decisions[groupKey] = { action = "skip" }
             index = index + 1
             renderStep()
         end)
-        f._btns[2] = skipBtn
 
-        nextBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        nextBtn:SetSize(100, 22)
+        nextBtn = BottomButton("nextBtn", "Next", 100)
         nextBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 20)
-        nextBtn:SetText("Next")
         nextBtn:SetScript("OnClick", function()
             if isGuild then
                 decisions[groupKey] = { action = "remap", guild = chosenGuild.guild, realm = chosenGuild.realm }
@@ -792,7 +800,6 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
             index = index + 1
             renderStep()
         end)
-        f._btns[3] = nextBtn
         RefreshNextBtn()
     end
 
@@ -838,9 +845,8 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
 
         local function AddLine(text, color, indent, font)
             local leftPad = 8 + (indent or 0)
-            local fs = Track(content:CreateFontString(nil, "OVERLAY", font or "GameFontHighlight"))
+            local fs = Text(font or "GameFontHighlight", contentW - leftPad - 8)
             fs:SetPoint("TOPLEFT", content, "TOPLEFT", leftPad, -y)
-            fs:SetWidth(contentW - leftPad - 8)
             fs:SetJustifyH("LEFT")
             if fs.SetIndentedWordWrap then
                 fs:SetIndentedWordWrap(true)
@@ -891,20 +897,15 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         content:SetHeight(y + 10)
 
         -- Buttons: Cancel (left) | Import (right)
-        local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        cancelBtn:SetSize(120, 22)
+        local cancelBtn = BottomButton("cancelBtn", "Cancel", 120)
         cancelBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 20)
-        cancelBtn:SetText("Cancel")
         cancelBtn:SetScript("OnClick", function()
             CloseDialog()
             if onCommit then onCommit(false, nil, 0, 0) end
         end)
-        f._btns[1] = cancelBtn
 
-        local importBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        importBtn:SetSize(120, 22)
+        local importBtn = BottomButton("importBtn", "Import", 120)
         importBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 20)
-        importBtn:SetText("Import")
         if total == 0 then
             importBtn:Disable()
         end
@@ -913,7 +914,6 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
             CloseDialog()
             if onCommit then onCommit(true, finalRules, mappedN, skippedTotal) end
         end)
-        f._btns[2] = importBtn
     end
 
     -- Closing via X = cancel
@@ -7292,6 +7292,16 @@ function EmpireManager:InitIOFrame()
         local text = editBox:GetText()
         if not text or text:match("^%s*$") then
             statusText:SetText("|cffff4444No text to import|r")
+            return
+        end
+        -- At the cap the client has already cut the paste short. A truncated
+        -- string can still parse cleanly and import only part of the data, so
+        -- refuse it outright. The cap is maxLetters in EmpireManager.xml.
+        local maxLetters = editBox:GetMaxLetters()
+        if maxLetters > 0 and strlenutf8(text) >= maxLetters then
+            statusText:SetText(
+                string.format("|cffff4444Import text too long (max %s characters)|r", BreakUpLargeNumbers(maxLetters))
+            )
             return
         end
 

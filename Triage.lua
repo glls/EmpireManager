@@ -3122,29 +3122,26 @@ function EmpireManager:ShowVendorConfirmDialog(autoItems, confirmItems)
         f:SetBackdropColor(0.06, 0.06, 0.09, 0.95)
         f:RegisterForDrag("LeftButton")
         f.ScrollFrame:SetScrollChild(f.ScrollFrame.Content)
+        f._pool = self:CreateWidgetPool()
+        -- Action buttons are built once; their OnClick is rebound per show
+        -- because the handlers capture that show's item lists.
+        f.SellButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.SellButton:SetSize(100, 28)
+        f.SellButton:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 18)
+        f.SellButton:SetText("Sell")
+        f.CancelButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.CancelButton:SetSize(100, 28)
+        f.CancelButton:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 18)
+        f.CancelButton:SetText("Cancel")
         f._initialized = true
     end
 
     f.TitleText:SetText("EmpireManager - Confirm Vendor")
     f:SetHeight(320)
 
-    -- Clear previous content
-    if f._widgets then
-        for _, w in ipairs(f._widgets) do
-            if w.Hide then
-                w:Hide()
-            end
-            if w.SetScript then
-                pcall(w.SetScript, w, "OnEnter", nil)
-                pcall(w.SetScript, w, "OnLeave", nil)
-            end
-        end
-    end
-    f._widgets = {}
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
-    end
+    -- Return the last show's rows to the pool (WoW never frees a created widget).
+    local pool = f._pool
+    pool:ReleaseAll()
 
     local sf = f.ScrollFrame
     local content = sf.Content
@@ -3153,7 +3150,7 @@ function EmpireManager:ShowVendorConfirmDialog(autoItems, confirmItems)
     local y = 8
 
     -- Header
-    local hdr = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local hdr = pool:AcquireText(content, "GameFontNormalLarge")
     hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     local autoCount = #autoItems
     local confirmCount = #confirmItems
@@ -3174,7 +3171,7 @@ function EmpireManager:ShowVendorConfirmDialog(autoItems, confirmItems)
     y = y + 26
 
     -- Warning line
-    local warn = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+    local warn = pool:AcquireText(content, "GameFontHighlight")
     warn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     warn:SetText("|cffff8800These are uncommon or higher quality - check before selling.|r")
     y = y + 22
@@ -3185,18 +3182,21 @@ function EmpireManager:ShowVendorConfirmDialog(autoItems, confirmItems)
     for _, entry in ipairs(confirmItems) do
         local item = entry.item
         local qty = item.stackCount and item.stackCount > 1 and (" x" .. item.stackCount) or ""
-        local btn = Track(CreateFrame("Button", nil, content))
+        local btn = pool:Acquire("row", function()
+            local b = CreateFrame("Button", nil, content)
+            b.Text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            b.Text:SetAllPoints()
+            b.Text:SetJustifyH("LEFT")
+            return b
+        end)
         btn:SetSize(content:GetWidth() - 16, 16)
         btn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-        local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        fs:SetAllPoints()
-        fs:SetJustifyH("LEFT")
         local text = "  " .. (item.itemName or "?") .. qty
         local qc = ITEM_QUALITY_COLORS[item.quality]
         if qc then
             text = qc.hex .. text .. "|r"
         end
-        fs:SetText(text)
+        btn.Text:SetText(text)
         btn:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
             if item.bag and item.slot then
@@ -3214,39 +3214,21 @@ function EmpireManager:ShowVendorConfirmDialog(autoItems, confirmItems)
 
     content:SetHeight(y + 10)
 
-    -- Clean up old buttons
-    if f._btns then
-        for _, btn in ipairs(f._btns) do
-            btn:Hide()
-        end
-    end
-    f._btns = {}
-
     local intentionalClose = false
 
-    local sellBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    sellBtn:SetSize(100, 28)
-    sellBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 18)
-    sellBtn:SetText("Sell")
-    sellBtn:SetScript("OnClick", function()
+    f.SellButton:SetScript("OnClick", function()
         intentionalClose = true
         f:Hide()
         self.vendorConfirmFrame = nil
         self:_StartVendorSell(autoItems, confirmItems)
     end)
-    f._btns[1] = sellBtn
 
-    local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    cancelBtn:SetSize(100, 28)
-    cancelBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 18)
-    cancelBtn:SetText("Cancel")
-    cancelBtn:SetScript("OnClick", function()
+    f.CancelButton:SetScript("OnClick", function()
         intentionalClose = true
         f:Hide()
         self.vendorConfirmFrame = nil
         self:UpdateVendorBtnState()
     end)
-    f._btns[2] = cancelBtn
 
     f.CloseButton:SetScript("OnClick", function()
         if intentionalClose then
@@ -3638,6 +3620,21 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         f:SetBackdropColor(0.06, 0.06, 0.09, 0.95)
         f:RegisterForDrag("LeftButton")
         f.ScrollFrame:SetScrollChild(f.ScrollFrame.Content)
+        f._pool = self:CreateWidgetPool()
+        -- Bottom buttons (Send | Skip | Cancel) are built once; their OnClick is
+        -- rebound per show because the handlers capture that recipient's state.
+        f.SendButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.SendButton:SetSize(100, 28)
+        f.SendButton:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 14)
+        f.SendButton:SetText("Send")
+        f.SkipButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.SkipButton:SetSize(100, 28)
+        f.SkipButton:SetPoint("BOTTOM", f, "BOTTOM", 0, 14)
+        f.SkipButton:SetText("Skip")
+        f.CancelButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        f.CancelButton:SetSize(100, 28)
+        f.CancelButton:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 14)
+        f.CancelButton:SetText("Cancel")
         f._initialized = true
     end
 
@@ -3650,23 +3647,9 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
     local displayNameColored = recipientEntry and self:ClassColoredNameRealm(recipientEntry)
         or ("|cffffffff" .. recipient .. "|r")
 
-    -- Clear previous content
-    if f._widgets then
-        for _, w in ipairs(f._widgets) do
-            if w.Hide then
-                w:Hide()
-            end
-            if w.SetScript then
-                pcall(w.SetScript, w, "OnEnter", nil)
-                pcall(w.SetScript, w, "OnLeave", nil)
-            end
-        end
-    end
-    f._widgets = {}
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
-    end
+    -- Return the last show's rows to the pool (WoW never frees a created widget).
+    local pool = f._pool
+    pool:ReleaseAll()
 
     local sf = f.ScrollFrame
     local content = sf.Content
@@ -3675,13 +3658,13 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
     local y = 8
 
     -- Line 1: "Sending Mail 1 of x"
-    local hdr = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local hdr = pool:AcquireText(content, "GameFontNormalLarge")
     hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     hdr:SetText(string.format("|cffffcc00Sending Mail %d of %d|r", index, #recipients))
     y = y + 26
 
     -- Line 2: "To: CharName - Realm"
-    local toFs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local toFs = pool:AcquireText(content, "GameFontNormalLarge")
     toFs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     toFs:SetText("|cffffffffTo:  |r" .. displayNameColored)
     y = y + 26
@@ -3689,7 +3672,7 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
     y = y + 6 -- spacer
 
     -- Subheading: item count
-    local subFs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+    local subFs = pool:AcquireText(content, "GameFontHighlight")
     subFs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     subFs:SetText(string.format("%d %s:", count, count == 1 and "item" or "items"))
     y = y + 18
@@ -3702,18 +3685,21 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         -- when set, else the whole stack.
         local shownCount = item.routeCount or item.stackCount or 0
         local qty = shownCount > 1 and (" x" .. shownCount) or ""
-        local btn = Track(CreateFrame("Button", nil, content))
+        local btn = pool:Acquire("row", function()
+            local b = CreateFrame("Button", nil, content)
+            b.Text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            b.Text:SetAllPoints()
+            b.Text:SetJustifyH("LEFT")
+            return b
+        end)
         btn:SetSize(content:GetWidth() - 16, 16)
         btn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-        local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        fs:SetAllPoints()
-        fs:SetJustifyH("LEFT")
         local text = "  " .. (item.itemName or "?") .. qty
         local qc = ITEM_QUALITY_COLORS[item.quality]
         if qc then
             text = qc.hex .. text .. "|r"
         end
-        fs:SetText(text)
+        btn.Text:SetText(text)
         btn:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
             if item.bag and item.slot then
@@ -3731,22 +3717,10 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
 
     content:SetHeight(y + 10)
 
-    -- Clean up old buttons
-    if f._btns then
-        for _, btn in ipairs(f._btns) do
-            btn:Hide()
-        end
-    end
-    f._btns = {}
-
     -- Bottom buttons: Send | Skip | Cancel
     local intentionalClose = false
 
-    local sendBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    sendBtn:SetSize(100, 28)
-    sendBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 14)
-    sendBtn:SetText("Send")
-    sendBtn:SetScript("OnClick", function()
+    f.SendButton:SetScript("OnClick", function()
         intentionalClose = true
         f:Hide()
         self.mailConfirmFrame = nil
@@ -3767,32 +3741,21 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
             self:ShowMailPerCharDialog(byRecipient, recipients, index + 1, totalSent + sent)
         end)
     end)
-    f._btns[1] = sendBtn
 
-    local skipBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    skipBtn:SetSize(100, 28)
-    skipBtn:SetPoint("BOTTOM", f, "BOTTOM", 0, 14)
-    skipBtn:SetText("Skip")
-    skipBtn:SetScript("OnClick", function()
+    f.SkipButton:SetScript("OnClick", function()
         intentionalClose = true
         f:Hide()
         self.mailConfirmFrame = nil
         self:ShowMailPerCharDialog(byRecipient, recipients, index + 1, totalSent)
     end)
-    f._btns[2] = skipBtn
 
-    local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    cancelBtn:SetSize(100, 28)
-    cancelBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 14)
-    cancelBtn:SetText("Cancel")
-    cancelBtn:SetScript("OnClick", function()
+    f.CancelButton:SetScript("OnClick", function()
         intentionalClose = true
         f:Hide()
         self.mailConfirmFrame = nil
         self:UpdateMailBtnState()
         reportMailed()
     end)
-    f._btns[3] = cancelBtn
 
     f.CloseButton:SetScript("OnClick", function()
         if intentionalClose then
@@ -7276,6 +7239,55 @@ local function AddDialogSubtitle(frame, text)
 end
 
 -------------------------------------------------------------------------------
+-- List window rows (Keep List, Vendor Whitelist, Guild / Character Blacklist)
+-- Pooled per window: WoW never frees a created widget, so each refresh reuses
+-- the previous rows instead of building new ones.
+-------------------------------------------------------------------------------
+
+-- Return the window's pool with every row released, ready for a rebuild.
+local function ResetListPool(addon, f)
+    if not f._pool then
+        f._pool = addon:CreateWidgetPool()
+    end
+    f._pool:ReleaseAll()
+    return f._pool
+end
+
+-- Row with name text on the left and a red X remove button on the right. The X
+-- is a child of the row, so it is pooled with it; the pool only clears the
+-- row's own scripts, so the X's are reset here and the caller binds OnClick.
+-- `removeTip` is the X's hover tooltip ("Remove from Keep List").
+local function AcquireListRow(pool, content, y, removeTip)
+    local row = pool:Acquire("listRow", function()
+        local r = CreateFrame("Button", nil, content)
+        r:RegisterForClicks("LeftButtonUp")
+        r.Name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        r.Name:SetPoint("LEFT", 2, 0)
+        r.Name:SetJustifyH("LEFT")
+        r.Remove = CreateFrame("Button", nil, r)
+        r.Remove:SetSize(20, 20)
+        r.Remove:SetPoint("RIGHT", -2, 0)
+        local xFs = r.Remove:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        xFs:SetAllPoints()
+        xFs:SetText("|cffff4444X|r")
+        return r
+    end)
+    row:SetSize(content:GetWidth() - 8, 20)
+    row:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)
+    row.Name:SetWidth(row:GetWidth() - 30)
+    row.Remove:SetScript("OnClick", nil)
+    row.Remove:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_CURSOR")
+        GameTooltip:SetText(removeTip, 1, 0.3, 0.3)
+        GameTooltip:Show()
+    end)
+    row.Remove:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    return row
+end
+
+-------------------------------------------------------------------------------
 -- Keep List Window
 -------------------------------------------------------------------------------
 
@@ -7341,19 +7353,7 @@ function EmpireManager:RefreshKeeplistDisplay()
     local content = sf.Content
     content:SetWidth(sf:GetWidth())
 
-    -- Clear previous
-    if f._widgets then
-        for _, w in ipairs(f._widgets) do
-            if w.Hide then
-                w:Hide()
-            end
-        end
-    end
-    f._widgets = {}
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
-    end
+    local pool = ResetListPool(self, f)
 
     local bl = self.db.global.keepList or {}
     local sorted = {}
@@ -7367,27 +7367,20 @@ function EmpireManager:RefreshKeeplistDisplay()
     local y = 4
 
     if #sorted == 0 then
-        local fs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local fs = pool:AcquireText(content, "GameFontHighlight")
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         fs:SetText("|cff999999No items on the Keep List.|r")
         y = y + 30
     else
         for _, entry in ipairs(sorted) do
-            local row = Track(CreateFrame("Button", nil, content))
-            row:SetSize(content:GetWidth() - 8, 20)
-            row:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)
-            row:RegisterForClicks("LeftButtonUp")
+            local row = AcquireListRow(pool, content, y, "Remove from Keep List")
 
             local itemName, itemLink, quality = C_Item.GetItemInfo(entry.id)
             local qc = ITEM_QUALITY_COLORS[(itemName and quality) or 1] or ITEM_QUALITY_COLORS[1]
             local icon = C_Item.GetItemIconByID(entry.id)
             local iconStr = icon and string.format("|T%s:16:16|t ", icon) or ""
 
-            local nameFs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            nameFs:SetPoint("LEFT", 2, 0)
-            nameFs:SetWidth(row:GetWidth() - 30)
-            nameFs:SetJustifyH("LEFT")
-            nameFs:SetText(
+            row.Name:SetText(
                 iconStr .. qc.hex .. entry.name .. "|r"
             )
 
@@ -7405,13 +7398,7 @@ function EmpireManager:RefreshKeeplistDisplay()
             end)
 
             -- Remove X button
-            local xBtn = Track(CreateFrame("Button", nil, row))
-            xBtn:SetSize(20, 20)
-            xBtn:SetPoint("RIGHT", -2, 0)
-            local xFs = xBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            xFs:SetAllPoints()
-            xFs:SetText("|cffff4444X|r")
-            xBtn:SetScript("OnClick", function()
+            row.Remove:SetScript("OnClick", function()
                 local popup =
                     StaticPopup_Show("EM_CONFIRM_REMOVE", string.format("Remove %s from Keep List?", entry.name))
                 if popup then
@@ -7501,18 +7488,7 @@ function EmpireManager:RefreshVendorlistDisplay()
     local content = sf.Content
     content:SetWidth(sf:GetWidth())
 
-    if f._widgets then
-        for _, w in ipairs(f._widgets) do
-            if w.Hide then
-                w:Hide()
-            end
-        end
-    end
-    f._widgets = {}
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
-    end
+    local pool = ResetListPool(self, f)
 
     local wl = self.db.global.vendorWhitelist or {}
     local sorted = {}
@@ -7526,27 +7502,20 @@ function EmpireManager:RefreshVendorlistDisplay()
     local y = 4
 
     if #sorted == 0 then
-        local fs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local fs = pool:AcquireText(content, "GameFontHighlight")
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         fs:SetText("|cff999999No items on the Vendor Whitelist.|r")
         y = y + 30
     else
         for _, entry in ipairs(sorted) do
-            local row = Track(CreateFrame("Button", nil, content))
-            row:SetSize(content:GetWidth() - 8, 20)
-            row:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)
-            row:RegisterForClicks("LeftButtonUp")
+            local row = AcquireListRow(pool, content, y, "Remove from Vendor Whitelist")
 
             local itemName, itemLink, quality = C_Item.GetItemInfo(entry.id)
             local qc = ITEM_QUALITY_COLORS[(itemName and quality) or 1] or ITEM_QUALITY_COLORS[1]
             local icon = C_Item.GetItemIconByID(entry.id)
             local iconStr = icon and string.format("|T%s:16:16|t ", icon) or ""
 
-            local nameFs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            nameFs:SetPoint("LEFT", 2, 0)
-            nameFs:SetWidth(row:GetWidth() - 30)
-            nameFs:SetJustifyH("LEFT")
-            nameFs:SetText(
+            row.Name:SetText(
                 iconStr .. qc.hex .. entry.name .. "|r"
             )
 
@@ -7563,13 +7532,7 @@ function EmpireManager:RefreshVendorlistDisplay()
                 GameTooltip:Hide()
             end)
 
-            local xBtn = Track(CreateFrame("Button", nil, row))
-            xBtn:SetSize(20, 20)
-            xBtn:SetPoint("RIGHT", -2, 0)
-            local xFs = xBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            xFs:SetAllPoints()
-            xFs:SetText("|cffff4444X|r")
-            xBtn:SetScript("OnClick", function()
+            row.Remove:SetScript("OnClick", function()
                 local popup =
                     StaticPopup_Show("EM_CONFIRM_REMOVE", string.format("Remove %s from Vendor Whitelist?", entry.name))
                 if popup then
@@ -7728,18 +7691,7 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
     local content = sf.Content
     content:SetWidth(sf:GetWidth())
 
-    if f._widgets then
-        for _, w in ipairs(f._widgets) do
-            if w.Hide then
-                w:Hide()
-            end
-        end
-    end
-    f._widgets = {}
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
-    end
+    local pool = ResetListPool(self, f)
 
     local bl = self.db.global.guildBlacklist or {}
     -- Keys are "Guild-Realm" composites (or bare guild names for legacy
@@ -7758,7 +7710,7 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
     local y = 4
 
     if #sorted == 0 then
-        local fs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local fs = pool:AcquireText(content, "GameFontHighlight")
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         fs:SetPoint("RIGHT", content, "RIGHT", -8, 0)
         fs:SetJustifyH("LEFT")
@@ -7767,22 +7719,10 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
     else
         for _, blItem in ipairs(sorted) do
             local guildName = blItem.label
-            local row = Track(CreateFrame("Button", nil, content))
-            row:SetSize(content:GetWidth() - 8, 20)
-            row:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)
+            local row = AcquireListRow(pool, content, y, "Remove from Blacklist")
+            row.Name:SetText("|cffffcc00" .. guildName .. "|r")
 
-            local nameFs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            nameFs:SetPoint("LEFT", 2, 0)
-            nameFs:SetWidth(row:GetWidth() - 30)
-            nameFs:SetJustifyH("LEFT")
-            nameFs:SetText("|cffffcc00" .. guildName .. "|r")
-
-            local xBtn = Track(CreateFrame("Button", nil, row))
-            xBtn:SetSize(20, 20)
-            xBtn:SetPoint("RIGHT", -2, 0)
-            local xFs = xBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            xFs:SetAllPoints()
-            xFs:SetText("|cffff4444X|r")
+            local xBtn = row.Remove
             xBtn:SetScript("OnClick", function()
                 local popup = StaticPopup_Show(
                     "EM_CONFIRM_REMOVE",
@@ -7800,14 +7740,6 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
                         end,
                     }
                 end
-            end)
-            xBtn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Remove from Blacklist", 1, 0.3, 0.3)
-                GameTooltip:Show()
-            end)
-            xBtn:SetScript("OnLeave", function()
-                GameTooltip:Hide()
             end)
 
             y = y + 22
@@ -7866,18 +7798,7 @@ function EmpireManager:RefreshCharBlacklistDisplay()
     local content = sf.Content
     content:SetWidth(sf:GetWidth())
 
-    if f._widgets then
-        for _, w in ipairs(f._widgets) do
-            if w.Hide then
-                w:Hide()
-            end
-        end
-    end
-    f._widgets = {}
-    local function Track(obj)
-        f._widgets[#f._widgets + 1] = obj
-        return obj
-    end
+    local pool = ResetListPool(self, f)
 
     local bl = self.db.global.charBlacklist or {}
     local sorted = {}
@@ -7891,7 +7812,7 @@ function EmpireManager:RefreshCharBlacklistDisplay()
     local y = 4
 
     if #sorted == 0 then
-        local fs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local fs = pool:AcquireText(content, "GameFontHighlight")
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         fs:SetPoint("RIGHT", content, "RIGHT", -8, 0)
         fs:SetJustifyH("LEFT")
@@ -7899,22 +7820,10 @@ function EmpireManager:RefreshCharBlacklistDisplay()
         y = y + 30
     else
         for _, entry in ipairs(sorted) do
-            local row = Track(CreateFrame("Button", nil, content))
-            row:SetSize(content:GetWidth() - 8, 20)
-            row:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)
+            local row = AcquireListRow(pool, content, y, "Remove from Blacklist")
+            row.Name:SetText("|cffffcc00" .. entry.label .. "|r")
 
-            local nameFs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            nameFs:SetPoint("LEFT", 2, 0)
-            nameFs:SetWidth(row:GetWidth() - 30)
-            nameFs:SetJustifyH("LEFT")
-            nameFs:SetText("|cffffcc00" .. entry.label .. "|r")
-
-            local xBtn = Track(CreateFrame("Button", nil, row))
-            xBtn:SetSize(20, 20)
-            xBtn:SetPoint("RIGHT", -2, 0)
-            local xFs = xBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            xFs:SetAllPoints()
-            xFs:SetText("|cffff4444X|r")
+            local xBtn = row.Remove
             xBtn:SetScript("OnClick", function()
                 local popup = StaticPopup_Show(
                     "EM_CONFIRM_REMOVE",
@@ -7936,14 +7845,6 @@ function EmpireManager:RefreshCharBlacklistDisplay()
                         end,
                     }
                 end
-            end)
-            xBtn:SetScript("OnEnter", function(btn)
-                GameTooltip:SetOwner(btn, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Remove from Blacklist", 1, 0.3, 0.3)
-                GameTooltip:Show()
-            end)
-            xBtn:SetScript("OnLeave", function()
-                GameTooltip:Hide()
             end)
 
             y = y + 22

@@ -211,53 +211,94 @@ end
 -- Body widget tracking
 -------------------------------------------------------------------------------
 
--- Track every transient widget we create on `wizard.Body` so step transitions
--- can fully release them. Widgets are kept in a flat list and hidden on clear;
--- script handlers are nilled on widgets that have them (FontStrings don't).
-local function TrackWidget(self, w)
-    self._widgets = self._widgets or {}
-    self._widgets[#self._widgets + 1] = w
-    return w
+-- Every step builds its widgets from pools so a re-render reuses them (WoW
+-- never frees a created widget, so recreating leaked on every render).
+-- `_pool` holds widgets on `wizard.Body`; `_listPool` holds the text inside the
+-- step 5 preview list, which lives on that list's scroll child.
+--
+-- Release hides and detaches widgets without reparenting them. Calling
+-- SetParent(nil) on widgets whose ancestors were touched by Blizzard's
+-- protected layout code (e.g. inside dropdown callbacks) propagates taint into
+-- shared LayoutFrame state, which then breaks unrelated UI (world-map tooltips,
+-- quest offer pins, etc.). The pool never reparents, so that stays safe.
+local function ClearBody(self)
+    if not self._pool then
+        self._pool = EmpireManager:CreateWidgetPool()
+        self._listPool = EmpireManager:CreateWidgetPool()
+    end
+    self._listPool:ReleaseAll()
+    self._pool:ReleaseAll()
 end
 
-local function ClearBody(self)
-    if not self._widgets then
-        self._widgets = {}
-        return
-    end
-    -- Hide and detach widgets without reparenting them. Calling SetParent(nil)
-    -- on widgets whose ancestors were touched by Blizzard's protected layout
-    -- code (e.g. inside dropdown callbacks) propagates taint into shared
-    -- LayoutFrame state, which then breaks unrelated UI (world-map tooltips,
-    -- quest offer pins, etc.). Hiding and clearing points is enough to make
-    -- the previous step's widgets invisible; we accept that they live until
-    -- the wizard frame itself is collected.
-    for _, w in ipairs(self._widgets) do
-        if w.HasScript and w:HasScript("OnClick") then
-            w:SetScript("OnClick", nil)
-        end
-        if w.HasScript and w:HasScript("OnEnter") then
-            w:SetScript("OnEnter", nil)
-            w:SetScript("OnLeave", nil)
-        end
-        if w.ClearAllPoints then
-            w:ClearAllPoints()
-        end
-        if w.Hide then
-            w:Hide()
-        end
-    end
-    self._widgets = {}
+-- Pooled plain text on the body (the pool restores the template's look on reuse).
+local function BodyText(self, template)
+    return self._pool:AcquireText(self.Body, template)
+end
+
+-- Blizzard-template widgets keep their template scripts across releases; every
+-- use rebinds its own OnClick and resets the state a previous use may have set.
+local function Radio(self)
+    local rb = self._pool:Acquire("radio", function()
+        local b = CreateFrame("CheckButton", nil, self.Body, "UIRadioButtonTemplate")
+        b._poolKeepScripts = true
+        return b
+    end)
+    rb:SetEnabled(true)
+    return rb
+end
+
+local function CheckBox(self)
+    local cb = self._pool:Acquire("check", function()
+        local b = CreateFrame("CheckButton", nil, self.Body, "UICheckButtonTemplate")
+        b._poolKeepScripts = true
+        return b
+    end)
+    cb:SetEnabled(true)
+    return cb
+end
+
+-- Callers run SetupMenu and EnableDropdownScrollToSelected on every use; the
+-- latter registers its callback with the dropdown as owner, which replaces the
+-- previous use's callback instead of stacking another.
+local function Dropdown(self)
+    return self._pool:Acquire("dropdown", function()
+        local dd = CreateFrame("DropdownButton", nil, self.Body, "WowStyle1DropdownTemplate")
+        dd._poolKeepScripts = true
+        return dd
+    end)
+end
+
+-- Clickable radio-option row (steps 2 and 3): hover highlight + label. The
+-- label anchors to the radio, which changes per use, so the caller anchors it.
+local function OptionRow(self)
+    local hit = self._pool:Acquire("optionRow", function()
+        local b = CreateFrame("Button", nil, self.Body)
+        b:RegisterForClicks("LeftButtonUp")
+        b.Highlight = b:CreateTexture(nil, "HIGHLIGHT")
+        b.Highlight:SetAllPoints(b)
+        b.Label = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        b.Label:SetJustifyH("LEFT")
+        return b
+    end)
+    hit.Highlight:SetColorTexture(1, 1, 1, 0.06)
+    hit.Label:ClearAllPoints()
+    return hit
 end
 
 -- Pair a label fontstring with a checkbox so clicking the label toggles the
--- box. Caller anchors the returned hit frame next to the checkbox.
+-- box. Caller anchors the returned hit frame next to the checkbox. Every
+-- caller passes the body as `parent`, so the kind is keyed on font alone.
 local function MakeClickableLabel(self, parent, cb, text, fontObject)
-    local hit = TrackWidget(self, CreateFrame("Button", nil, parent))
-    hit:RegisterForClicks("LeftButtonUp")
-    local fs = TrackWidget(self, hit:CreateFontString(nil, "OVERLAY", fontObject or "GameFontNormal"))
-    fs:SetPoint("LEFT", hit, "LEFT", 0, 0)
-    fs:SetJustifyH("LEFT")
+    local font = fontObject or "GameFontNormal"
+    local hit = self._pool:Acquire("clickLabel:" .. font, function()
+        local b = CreateFrame("Button", nil, parent)
+        b:RegisterForClicks("LeftButtonUp")
+        b.Label = b:CreateFontString(nil, "OVERLAY", font)
+        b.Label:SetPoint("LEFT", b, "LEFT", 0, 0)
+        b.Label:SetJustifyH("LEFT")
+        return b
+    end)
+    local fs = hit.Label
     fs:SetText(text)
     fs:SetTextColor(1, 1, 1)
     hit:SetSize(fs:GetStringWidth() + 4, math.max(fs:GetStringHeight() + 4, 26))
@@ -481,11 +522,11 @@ local STEP_LEFT = 16
 function EMWizardMixin:RenderStep1()
     local body = self.Body
     local top = STEP_TOP - 24
-    local title = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local title = BodyText(self, "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -top)
     title:SetText("Pick a template")
 
-    local hint = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+    local hint = BodyText(self, "GameFontHighlight")
     hint:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(top + 22))
     hint:SetText("|cffe8d9a8Generates a starter set of Storage Rules. Edit anything later.|r")
 
@@ -506,37 +547,38 @@ function EMWizardMixin:RenderStep1()
 
         -- Whole-row clickable hit zone covering the label + description, so the
         -- user doesn't need to hit the small radio circle.
-        local hit = TrackWidget(self, CreateFrame("Button", nil, body))
+        local hit = self._pool:Acquire("templateRow", function()
+            local b = CreateFrame("Button", nil, body)
+            b:RegisterForClicks("LeftButtonUp")
+            b.Label = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            b.Label:SetPoint("TOPLEFT", b, "TOPLEFT", 6, -6)
+            b.Desc = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            b.Desc:SetPoint("TOPLEFT", b.Label, "BOTTOMLEFT", 0, -2)
+            b.Desc:SetPoint("RIGHT", b, "RIGHT", -4, 0)
+            b.Desc:SetJustifyH("LEFT")
+            -- Subtle highlight on hover so users see the row is clickable.
+            local hl = b:CreateTexture(nil, "HIGHLIGHT")
+            hl:SetAllPoints(b)
+            hl:SetColorTexture(1, 1, 1, 0.06)
+            return b
+        end)
         hit:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT + 24, -y)
         hit:SetPoint("RIGHT", body, "RIGHT", -8, 0)
         hit:SetHeight(42)
 
-        local rb = TrackWidget(self, CreateFrame("CheckButton", nil, body, "UIRadioButtonTemplate"))
+        -- pickThis re-renders, which sets every radio's checked state. Do not
+        -- touch the clicked button afterwards: the pool may already have handed
+        -- it to the new render.
+        local rb = Radio(self)
         rb:SetPoint("LEFT", hit, "LEFT", -24, 0)
         rb:SetChecked(self._state.template == t.key)
-        rb:SetScript("OnClick", function(btn)
-            pickThis()
-            btn:SetChecked(true)
-        end)
-        hit:RegisterForClicks("LeftButtonUp")
+        rb:SetScript("OnClick", pickThis)
         hit:SetScript("OnClick", pickThis)
 
-        local label = TrackWidget(self, hit:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
-        label:SetPoint("TOPLEFT", hit, "TOPLEFT", 6, -6)
-        label:SetText(t.label)
-        label:SetTextColor(1, 0.82, 0)
-
-        local desc = TrackWidget(self, hit:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"))
-        desc:SetPoint("TOPLEFT", label, "BOTTOMLEFT", 0, -2)
-        desc:SetPoint("RIGHT", hit, "RIGHT", -4, 0)
-        desc:SetJustifyH("LEFT")
-        desc:SetText(t.desc)
-        desc:SetTextColor(1, 1, 1)
-
-        -- Subtle highlight on hover so users see the row is clickable.
-        local hl = hit:CreateTexture(nil, "HIGHLIGHT")
-        hl:SetAllPoints(hit)
-        hl:SetColorTexture(1, 1, 1, 0.06)
+        hit.Label:SetText(t.label)
+        hit.Label:SetTextColor(1, 0.82, 0)
+        hit.Desc:SetText(t.desc)
+        hit.Desc:SetTextColor(1, 1, 1)
 
         y = y + 46
     end
@@ -557,14 +599,14 @@ function EMWizardMixin:RenderStep2()
         end
     end
 
-    local title = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local title = BodyText(self, "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -STEP_TOP)
     title:SetPoint("RIGHT", body, "RIGHT", -8, 0)
     title:SetJustifyH("LEFT")
     title:SetText(tmplLabel or "Configure template")
 
     if tmplDesc then
-        local subtitle = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local subtitle = BodyText(self, "GameFontHighlight")
         subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
         subtitle:SetPoint("RIGHT", body, "RIGHT", -8, 0)
         subtitle:SetJustifyH("LEFT")
@@ -573,14 +615,14 @@ function EMWizardMixin:RenderStep2()
     end
 
     if tmpl == "self_banker" then
-        local hint = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local hint = BodyText(self, "GameFontHighlight")
         hint:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(STEP_TOP + 48))
         hint:SetPoint("RIGHT", body, "RIGHT", -8, 0)
         hint:SetJustifyH("LEFT")
         hint:SetWordWrap(true)
         hint:SetText("|cffe8d9a8When multiple Characters have the same Profession, this template normally creates one rule per Character. Check the option below to route to the highest-skill Character only.|r")
 
-        local cb = TrackWidget(self, CreateFrame("CheckButton", nil, body, "UICheckButtonTemplate"))
+        local cb = CheckBox(self)
         cb:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT - 6, -(STEP_TOP + 106))
         cb:SetChecked(self._state.maxSkillOnly and true or false)
         cb:SetScript("OnClick", function(btn)
@@ -592,7 +634,7 @@ function EMWizardMixin:RenderStep2()
     end
 
     if tmpl == "mule_banker" then
-        local label = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+        local label = BodyText(self, "GameFontNormal")
         label:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(STEP_TOP + 54))
         label:SetPoint("RIGHT", body, "RIGHT", -8, 0)
         label:SetJustifyH("LEFT")
@@ -600,7 +642,7 @@ function EMWizardMixin:RenderStep2()
         label:SetText("Pick the Mule - the Character that will hold every Profession's mats for the rest of the roster.")
         label:SetTextColor(1, 0.82, 0)
 
-        local dd = TrackWidget(self, CreateFrame("DropdownButton", nil, body, "WowStyle1DropdownTemplate"))
+        local dd = Dropdown(self)
         dd:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(STEP_TOP + 96))
         dd:SetWidth(360)
         local chars = SortedChars()
@@ -639,7 +681,7 @@ function EMWizardMixin:RenderStep2()
             self._state.dest = "warband"
         end
 
-        local destLabel = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+        local destLabel = BodyText(self, "GameFontNormal")
         destLabel:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(STEP_TOP + 54))
         destLabel:SetText("Destination:")
         destLabel:SetTextColor(1, 0.82, 0)
@@ -657,25 +699,20 @@ function EMWizardMixin:RenderStep2()
                 self._state.dest = opt.key
                 self:Render()
             end
-            local rb = TrackWidget(self, CreateFrame("CheckButton", nil, body, "UIRadioButtonTemplate"))
+            -- pickThis re-renders (see RenderStep1 for why the button is not
+            -- touched afterwards).
+            local rb = Radio(self)
             rb:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -y)
             rb:SetChecked(self._state.dest == opt.key)
-            rb:SetScript("OnClick", function(btn)
-                pickThis()
-                btn:SetChecked(true)
-            end)
+            rb:SetScript("OnClick", pickThis)
 
-            local hit = TrackWidget(self, CreateFrame("Button", nil, body))
+            local hit = OptionRow(self)
             hit:SetPoint("TOPLEFT", rb, "TOPRIGHT", 0, 0)
             hit:SetPoint("RIGHT", body, "RIGHT", -8, 0)
             hit:SetHeight(24)
-            hit:RegisterForClicks("LeftButtonUp")
             hit:SetScript("OnClick", pickThis)
-            local hl = hit:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetAllPoints(hit)
-            hl:SetColorTexture(1, 1, 1, 0.06)
 
-            local rl = TrackWidget(self, hit:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+            local rl = hit.Label
             rl:SetPoint("LEFT", rb, "RIGHT", 4, 0)
             rl:SetPoint("RIGHT", hit, "RIGHT", -4, 0)
             rl:SetJustifyH("LEFT")
@@ -685,18 +722,18 @@ function EMWizardMixin:RenderStep2()
         end
 
         if self._state.dest == "guild" then
-            local guildLabel = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+            local guildLabel = BodyText(self, "GameFontNormal")
             guildLabel:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(y + 8))
             guildLabel:SetText("Guild:")
             guildLabel:SetTextColor(1, 0.82, 0)
 
-            local guildDD = TrackWidget(self, CreateFrame("DropdownButton", nil, body, "WowStyle1DropdownTemplate"))
+            local guildDD = Dropdown(self)
             guildDD:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(y + 30))
             guildDD:SetWidth(360)
 
             local guilds = SortedGuilds()
             if #guilds == 0 then
-                local warn = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+                local warn = BodyText(self, "GameFontHighlight")
                 warn:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(y + 70))
                 warn:SetPoint("RIGHT", body, "RIGHT", 0, 0)
                 warn:SetJustifyH("LEFT")
@@ -728,12 +765,12 @@ function EMWizardMixin:RenderStep2()
         end
 
         if self._state.dest == "char" then
-            local charLabel = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+            local charLabel = BodyText(self, "GameFontNormal")
             charLabel:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(y + 8))
             charLabel:SetText("Character:")
             charLabel:SetTextColor(1, 0.82, 0)
 
-            local charDD = TrackWidget(self, CreateFrame("DropdownButton", nil, body, "WowStyle1DropdownTemplate"))
+            local charDD = Dropdown(self)
             charDD:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(y + 30))
             charDD:SetWidth(360)
 
@@ -771,7 +808,7 @@ function EMWizardMixin:RenderStep2()
 
     if tmpl == "hybrid" then
         local cur = CurrentExpansionInfo()
-        local label = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+        local label = BodyText(self, "GameFontNormal")
         label:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -(STEP_TOP + 54))
         label:SetText(string.format("Current expansion: |cffffd100%s|r", cur and cur.label or "?"))
         label:SetTextColor(1, 1, 1)
@@ -789,25 +826,20 @@ function EMWizardMixin:RenderStep2()
                 self._state.hybridDir = opt.key
                 self:Render()
             end
-            local rb = TrackWidget(self, CreateFrame("CheckButton", nil, body, "UIRadioButtonTemplate"))
+            -- pickThis re-renders (see RenderStep1 for why the button is not
+            -- touched afterwards).
+            local rb = Radio(self)
             rb:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -y)
             rb:SetChecked(self._state.hybridDir == opt.key)
-            rb:SetScript("OnClick", function(btn)
-                pickThis()
-                btn:SetChecked(true)
-            end)
+            rb:SetScript("OnClick", pickThis)
 
-            local hit = TrackWidget(self, CreateFrame("Button", nil, body))
+            local hit = OptionRow(self)
             hit:SetPoint("TOPLEFT", rb, "TOPRIGHT", 0, 0)
             hit:SetPoint("RIGHT", body, "RIGHT", -8, 0)
             hit:SetHeight(24)
-            hit:RegisterForClicks("LeftButtonUp")
             hit:SetScript("OnClick", pickThis)
-            local hl = hit:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetAllPoints(hit)
-            hl:SetColorTexture(1, 1, 1, 0.06)
 
-            local rl = TrackWidget(self, hit:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+            local rl = hit.Label
             rl:SetPoint("LEFT", rb, "RIGHT", 4, 0)
             rl:SetPoint("RIGHT", hit, "RIGHT", -4, 0)
             rl:SetJustifyH("LEFT")
@@ -821,14 +853,14 @@ function EMWizardMixin:RenderStep2()
         -- and dedupes by itself, so this toggle only collapses the charbank
         -- rule to one per Profession (the highest-skill Character).
         local hintY = y + 8
-        local hint = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local hint = BodyText(self, "GameFontHighlight")
         hint:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -hintY)
         hint:SetPoint("RIGHT", body, "RIGHT", -8, 0)
         hint:SetJustifyH("LEFT")
         hint:SetWordWrap(true)
         hint:SetText("|cffe8d9a8When multiple Characters have the same Profession, this template normally creates one Character Bank rule per Character. Check the option below to route to the highest-skill Character only.|r")
 
-        local cb = TrackWidget(self, CreateFrame("CheckButton", nil, body, "UICheckButtonTemplate"))
+        local cb = CheckBox(self)
         cb:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT - 6, -(hintY + 58))
         cb:SetChecked(self._state.maxSkillOnly and true or false)
         cb:SetScript("OnClick", function(btn)
@@ -843,7 +875,7 @@ end
 function EMWizardMixin:RenderStep3()
     local body = self.Body
 
-    local title = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    local title = BodyText(self, "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -STEP_TOP)
     title:SetText("Choose Characters for Storage Rules creation")
 
@@ -871,30 +903,27 @@ function EMWizardMixin:RenderStep3()
             self._state.scope = opt.key
             self:Render()
         end
-        local rb = TrackWidget(self, CreateFrame("CheckButton", nil, body, "UIRadioButtonTemplate"))
+        local rb = Radio(self)
         rb:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -y)
         rb:SetChecked(self._state.scope == opt.key)
         if disabled then
             rb:Disable()
         end
-        rb:SetScript("OnClick", function(btn)
-            pickThis()
-            btn:SetChecked(self._state.scope == opt.key)
-        end)
+        -- An enabled click re-renders (see RenderStep1 for why the button is
+        -- not touched afterwards); a disabled radio never fires OnClick.
+        rb:SetScript("OnClick", pickThis)
 
-        local hit = TrackWidget(self, CreateFrame("Button", nil, body))
+        local hit = OptionRow(self)
         hit:SetPoint("TOPLEFT", rb, "TOPRIGHT", 0, 0)
         hit:SetPoint("RIGHT", body, "RIGHT", -8, 0)
         hit:SetHeight(24)
-        hit:RegisterForClicks("LeftButtonUp")
         hit:SetScript("OnClick", pickThis)
-        if not disabled then
-            local hl = hit:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetAllPoints(hit)
-            hl:SetColorTexture(1, 1, 1, 0.06)
+        if disabled then
+            -- No hover highlight on a disabled option.
+            hit.Highlight:SetColorTexture(1, 1, 1, 0)
         end
 
-        local rl = TrackWidget(self, hit:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        local rl = hit.Label
         rl:SetPoint("LEFT", rb, "RIGHT", 4, 0)
         rl:SetPoint("RIGHT", hit, "RIGHT", -4, 0)
         rl:SetJustifyH("LEFT")
@@ -918,7 +947,7 @@ function EMWizardMixin:RenderStep3()
         end
     end
 
-    local summary = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+    local summary = BodyText(self, "GameFontHighlight")
     summary:SetPoint("TOPLEFT", body, "TOPLEFT", STEP_LEFT, -y - 12)
     summary:SetPoint("RIGHT", body, "RIGHT", 0, 0)
     summary:SetJustifyH("LEFT")
@@ -944,7 +973,7 @@ function EMWizardMixin:RenderStep3()
     -- "Only Professions of <currentChar>" scope already implies a single
     -- target and the list of skipped names is irrelevant there.
     if self._state.scope == "all" and #skipped > 0 then
-        local skipNote = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"))
+        local skipNote = BodyText(self, "GameFontHighlightSmall")
         skipNote:SetPoint("TOPLEFT", summary, "BOTTOMLEFT", 0, -14)
         skipNote:SetPoint("RIGHT", body, "RIGHT", 0, 0)
         skipNote:SetJustifyH("LEFT")
@@ -996,7 +1025,7 @@ function EMWizardMixin:RenderStep5()
     local STEP5_LEFT = STEP_LEFT
     local STEP5_TOP = STEP_TOP - 32
 
-    local summary = TrackWidget(self, body:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+    local summary = BodyText(self, "GameFontHighlight")
     summary:SetPoint("TOPLEFT", body, "TOPLEFT", STEP5_LEFT, -STEP5_TOP)
     summary:SetPoint("RIGHT", body, "RIGHT", 0, 0)
     summary:SetJustifyH("LEFT")
@@ -1097,33 +1126,50 @@ function EMWizardMixin:RenderStep5()
     end
     summary:SetText(summaryText)
 
+    local function Divider()
+        return self._pool:Acquire("divider", function()
+            local t = body:CreateTexture(nil, "ARTWORK")
+            t:SetAtlas("perks-divider-short", true)
+            return t
+        end)
+    end
+
     -- Separator above the scroll frame (sits between summary text and list).
-    local sepTop = TrackWidget(self, body:CreateTexture(nil, "ARTWORK"))
-    sepTop:SetAtlas("perks-divider-short", true)
+    local sepTop = Divider()
     sepTop:SetPoint("TOP", body, "TOP", 0, -(STEP5_TOP + 52))
 
-    -- Scrollable preview list grouped by char.
-    local scroll = TrackWidget(self, CreateFrame("ScrollFrame", nil, body, "ScrollFrameTemplate"))
+    -- Scrollable preview list grouped by char. One per render, so it and its
+    -- scroll child are built once and reused; the list text comes from
+    -- `_listPool`, parented to that same scroll child.
+    local scroll = self._pool:Acquire("previewScroll", function()
+        local s = CreateFrame("ScrollFrame", nil, body, "ScrollFrameTemplate")
+        s._poolKeepScripts = true
+        local c = CreateFrame("Frame", nil, s)
+        c:SetSize(1, 1)
+        s:SetScrollChild(c)
+        -- Match content width to the scroll viewport so rows have a real width to
+        -- lay out in. Without this, content stays at width=1 and rows with
+        -- SetPoint("RIGHT", content, ...) wrap heavily, leaving big vertical gaps.
+        s:HookScript("OnSizeChanged", function(_, w, _)
+            c:SetWidth(math.max(1, w))
+        end)
+        s.Content = c
+        return s
+    end)
     scroll:SetPoint("TOPLEFT", body, "TOPLEFT", STEP5_LEFT, -(STEP5_TOP + 60))
     scroll:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", -22, 86)
+    -- A fresh frame used to open at the top; keep that on reuse.
+    scroll:SetVerticalScroll(0)
 
     -- Separator below the scroll frame (between list and clearExisting checkbox).
-    local sepBot = TrackWidget(self, body:CreateTexture(nil, "ARTWORK"))
-    sepBot:SetAtlas("perks-divider-short", true)
+    local sepBot = Divider()
     sepBot:SetPoint("BOTTOM", body, "BOTTOM", 0, 78)
 
-    local content = TrackWidget(self, CreateFrame("Frame", nil, scroll))
-    content:SetSize(1, 1)
-    scroll:SetScrollChild(content)
-    -- Match content width to the scroll viewport so rows have a real width to
-    -- lay out in. Without this, content stays at width=1 and rows with
-    -- SetPoint("RIGHT", content, ...) wrap heavily, leaving big vertical gaps.
-    scroll:HookScript("OnSizeChanged", function(_, w, _)
-        content:SetWidth(math.max(1, w))
-    end)
+    local content = scroll.Content
     if scroll:GetWidth() > 1 then
         content:SetWidth(scroll:GetWidth())
     end
+    local listPool = self._listPool
 
     -- Group rules by char (or by destination if no char)
     local groups, order = {}, {}
@@ -1140,7 +1186,7 @@ function EMWizardMixin:RenderStep5()
     local profByKey = EmpireManager.PROF_INFO_BY_KEY or {}
     for _, key in ipairs(order) do
         local g = groups[key]
-        local header = content:CreateFontString(nil, "OVERLAY", "GameFontNormalMed1")
+        local header = listPool:AcquireText(content, "GameFontNormalMed1")
         header:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
         local headerText
         if g.isChar then
@@ -1160,7 +1206,7 @@ function EMWizardMixin:RenderStep5()
         y = y + 20
 
         for _, r in ipairs(g.rules) do
-            local row = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            local row = listPool:AcquireText(content, "GameFontHighlightSmall")
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
             row:SetPoint("RIGHT", content, "RIGHT", -8, 0)
             row:SetJustifyH("LEFT")
@@ -1201,7 +1247,7 @@ function EMWizardMixin:RenderStep5()
     end
 
     if #order == 0 then
-        local empty = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        local empty = listPool:AcquireText(content, "GameFontHighlight")
         empty:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
         empty:SetText("|cffff8800No rules generated. Go back and adjust your selections.|r")
         y = 24
@@ -1213,7 +1259,7 @@ function EMWizardMixin:RenderStep5()
         self._state.clearExisting = false
     end
 
-    local cbClear = TrackWidget(self, CreateFrame("CheckButton", nil, body, "UICheckButtonTemplate"))
+    local cbClear = CheckBox(self)
     cbClear:SetPoint("BOTTOMLEFT", body, "BOTTOMLEFT", STEP5_LEFT, 46)
     cbClear:SetChecked(self._state.clearExisting)
     cbClear:SetScript("OnClick", function(btn)

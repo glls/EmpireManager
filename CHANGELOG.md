@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.10] - 2026-10-27
+
+### Added
+
+- **Right-click to skip in the Restock confirmation.** Right-click an item to leave it out of this transfer, or right-click a section header to leave out the whole section. Skipped items stay out for this transfer only.
+
+### Changed
+
+- **The Restock confirmation updates while it is open.** Moving items in your bags or banks refreshes the list, and the window closes when nothing is left to move.
+- **Lower memory use.** The Restock, vendor and mail confirmations, the Keep List, Vendor Whitelist and Blacklist windows, the Setup Wizard and the import remap picker reuse their rows instead of creating new ones each time.
+
+### Fixed
+
+- **Pasting a very large text into the Import/Export window no longer freezes the game.** A huge paste could hang the client long enough to disconnect. The box now takes up to 64,000 characters, and longer text is refused instead of partly imported.
+- **Hovering the X on the Keep List and Vendor Whitelist shows a tooltip,** like the Blacklist windows.
+
 ## [1.2.9] - 2026-10-19
 
 ### Fixed
