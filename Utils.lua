@@ -268,6 +268,22 @@ EmpireManager.EXPANSION_ID_BY_TIER_LINE = {
     [2534] = 6, [2533] = 7, [2759] = 8, [2831] = 9, [2883] = 10, [2918] = 11,
 }
 
+-- Weekly Knowledge sources for the current expansion (docs/KNOWLEDGE.md), keyed by
+-- base profession skill line. A quest list with several IDs is a pool: any one done counts.
+EmpireManager.KNOWLEDGE_WEEKLY = {
+    [171] = { key = "alchemy", tier = 2906, spell = 471003, treatise = 95127, item = 245755, quests = { 93690 } }, -- Alchemy
+    [164] = { key = "blacksmithing", tier = 2907, spell = 471004, treatise = 95128, item = 245763, quests = { 93691 } }, -- Blacksmithing
+    [333] = { key = "enchanting", tier = 2909, spell = 471006, treatise = 95129, item = 245759, quests = { 93697, 93698, 93699 } }, -- Enchanting
+    [202] = { key = "engineering", tier = 2910, spell = 471007, treatise = 95138, item = 245809, quests = { 93692 } }, -- Engineering
+    [182] = { key = "herbalism", tier = 2912, spell = 471009, treatise = 95130, item = 245761, quests = { 93700, 93701, 93702, 93703, 93704 } }, -- Herbalism
+    [773] = { key = "inscription", tier = 2913, spell = 471010, treatise = 95131, item = 245757, quests = { 93693 } }, -- Inscription
+    [755] = { key = "jewelcrafting", tier = 2914, spell = 471011, treatise = 95133, item = 245760, quests = { 93694 } }, -- Jewelcrafting
+    [165] = { key = "leatherworking", tier = 2915, spell = 471012, treatise = 95134, item = 245758, quests = { 93695 } }, -- Leatherworking
+    [186] = { key = "mining", tier = 2916, spell = 471013, treatise = 95135, item = 245762, quests = { 93705, 93706, 93707, 93708, 93709 } }, -- Mining
+    [393] = { key = "skinning", tier = 2917, spell = 471014, treatise = 95136, item = 245828, quests = { 93710, 93711, 93712, 93713, 93714 } }, -- Skinning
+    [197] = { key = "tailoring", tier = 2918, spell = 471015, treatise = 95137, item = 245756, quests = { 93696 } }, -- Tailoring
+}
+
 -- Returns an inline texture string for an expansion icon, cropped to its iconWidth
 function EmpireManager:ExpIconString(expInfo, yOffset)
     local w = expInfo.iconWidth or 44
@@ -1871,7 +1887,7 @@ function EmpireManager:FormatRoles(assignments)
         return ""
     end
     for i, icon in ipairs(parts) do
-        parts[i] = string.format("|T%s:24:24|t", icon)
+        parts[i] = string.format("|T%s:20:20|t", icon)
     end
     return table.concat(parts, " ")
 end
@@ -1884,7 +1900,7 @@ function EmpireManager:FormatProfTags(assignments)
     local parts = {}
     for _, info in ipairs(self.PROF_DISPLAY) do
         if profSet[info.key] then
-            parts[#parts + 1] = string.format("|T%s:24:24|t", info.icon)
+            parts[#parts + 1] = string.format("|T%s:20:20|t", info.icon)
         end
     end
     return #parts > 0 and table.concat(parts, " ") or ""

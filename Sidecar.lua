@@ -565,6 +565,155 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
         y = y + 34
     end
 
+    y = self:BuildMountPicker(content, y, entry)
+    return y
+end
+
+local MOUNT_FMT = "|T%s:14:14|t %s"
+local MOUNT_NONE = "None (random favorite)"
+
+local function MountFirstLetter(name)
+    local first = name:match("^[%z\1-\127\194-\244][\128-\191]*") or ""
+    return first:match("^%a$") and first:upper() or "#"
+end
+
+function EMSidecarMixin:BuildMountPicker(content, y, entry)
+    y = y + 4
+    local sep = self:Divider(content)
+    sep:SetPoint("TOP", content, "TOP", 0, -y)
+    y = y + 16
+
+    local hdr = self:Text(content, "GameFontNormalLarge")
+    hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+    hdr:SetText("|cffffd100Select your favorite mounts|r")
+    y = y + LINE_HEIGHT + 6
+
+    local function isPicked(mountID)
+        return entry.favMounts and entry.favMounts[mountID] or false
+    end
+    local function togglePick(mountID)
+        local picks = entry.favMounts or {}
+        picks[mountID] = not picks[mountID] or nil
+        entry.favMounts = next(picks) and picks or nil
+    end
+    local function sortedPicks()
+        local list = {}
+        for mountID in pairs(entry.favMounts or {}) do
+            local name, _, icon, _, _, _, _, _, _, hideOnChar, isCollected = C_MountJournal.GetMountInfoByID(mountID)
+            if name and isCollected and hideOnChar ~= true then
+                list[#list + 1] = { id = mountID, name = name, icon = icon }
+            end
+        end
+        table.sort(list, function(a, b)
+            return a.name < b.name
+        end)
+        return list
+    end
+
+    local mountDD = self:Slot("mountDD", "DropdownButton", content, "WowStyle1DropdownTemplate")
+    mountDD:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+    mountDD:SetWidth(290)
+
+    local macroBtn = self:Slot("mountMacroBtn", "Button", content, "UIPanelButtonTemplate")
+    macroBtn:SetSize(86, 22)
+    macroBtn:SetPoint("LEFT", mountDD, "RIGHT", 6, 0)
+    macroBtn:SetText("Macro")
+    macroBtn:SetScript("OnClick", function()
+        EmpireManager:PickupMountMacro()
+    end)
+    macroBtn:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_CURSOR_RIGHT")
+        GameTooltip:AddLine("Mount Macro", 1, 0.82, 0)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Click to pick up the EM Mount macro, then put it on an action bar.", 1, 1, 1, true)
+        GameTooltip:AddLine("It summons one of your mounts, or dismounts.", 1, 1, 1, true)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Or set a key in Options > Keybindings > EmpireManager.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    macroBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    mountDD:EnableMouseWheel(false)
+    mountDD:EnableRegenerateOnResponse()
+    mountDD:SetSelectionText(function()
+        local picks = sortedPicks()
+        if #picks == 0 then
+            return MOUNT_NONE
+        end
+        return #picks == 1 and MOUNT_FMT:format(picks[1].icon, picks[1].name) or string.format("%d mounts", #picks)
+    end)
+    mountDD:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_CURSOR_RIGHT")
+        GameTooltip:AddLine("Favorite Mounts", 1, 0.82, 0)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Summon one of these at random", 1, 1, 1, true)
+        local picks = sortedPicks()
+        if #picks > 0 then
+            GameTooltip:AddLine(" ")
+            for _, m in ipairs(picks) do
+                GameTooltip:AddLine(MOUNT_FMT:format(m.icon, m.name), 1, 1, 1)
+            end
+        end
+        GameTooltip:Show()
+    end)
+    mountDD:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+
+    mountDD:SetupMenu(function(dd, root)
+        -- SetupMenu regenerates on every Sidecar redraw: build the list only when clicked.
+        if not dd:IsMouseOver() and not dd:IsMenuOpen() then
+            return
+        end
+
+        local picked, byLetter, letters = {}, {}, {}
+        for _, mountID in ipairs(C_MountJournal.GetMountIDs()) do
+            local name, _, icon, _, _, _, _, _, _, hideOnChar, isCollected = C_MountJournal.GetMountInfoByID(mountID)
+            if name and isCollected and hideOnChar ~= true then
+                local m = { id = mountID, name = name, icon = icon }
+                if isPicked(mountID) then
+                    picked[#picked + 1] = m
+                end
+                local letter = MountFirstLetter(name)
+                if not byLetter[letter] then
+                    byLetter[letter] = {}
+                    letters[#letters + 1] = letter
+                end
+                local list = byLetter[letter]
+                list[#list + 1] = m
+            end
+        end
+        local function byName(a, b)
+            return a.name < b.name
+        end
+        local function addList(parent, list)
+            table.sort(list, byName)
+            for _, m in ipairs(list) do
+                parent:CreateCheckbox(MOUNT_FMT:format(m.icon, m.name), isPicked, togglePick, m.id)
+            end
+            if #list > 25 then
+                parent:SetScrollMode(500)
+            end
+        end
+
+        if #picked > 0 then
+            table.sort(picked, byName)
+            for _, m in ipairs(picked) do
+                root:CreateCheckbox(MOUNT_FMT:format(m.icon, m.name), isPicked, togglePick, m.id)
+            end
+            root:CreateButton("Clear all", function()
+                entry.favMounts = nil
+            end)
+            root:CreateDivider()
+        end
+        table.sort(letters)
+        for _, letter in ipairs(letters) do
+            addList(root:CreateButton(string.format("%s (%d)", letter, #byLetter[letter])), byLetter[letter])
+        end
+    end)
+    y = y + 34
+
     return y
 end
 
@@ -572,7 +721,48 @@ end
 -- Details Tab (read-only character info)
 -------------------------------------------------------------------------------
 
-function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
+local KW_DONE = "|TInterface\\RaidFrame\\ReadyCheck-Ready:14:14|t"
+local KW_PARTIAL = "|TInterface\\RaidFrame\\ReadyCheck-Waiting:14:14|t"
+local KW_MISSING = "|TInterface\\RaidFrame\\ReadyCheck-NotReady:14:14|t"
+local KW_QUEST = EmpireManager.KW_QUEST_ICON
+local KW_STATE = { done = KW_DONE, bags = KW_PARTIAL, active = KW_PARTIAL }
+
+local function KnowledgeIcons(d, state)
+    local treatise = string.format("|T%d:14:14|t", C_Item.GetItemIconByID(d.item) or 134400)
+    local text = treatise .. (KW_STATE[state.treatise] or KW_MISSING) .. "  " .. KW_QUEST .. (KW_STATE[state.quest] or KW_MISSING)
+    if state.kp then
+        text = text .. (state.kp == 0 and "  |cff00cc00KP|r" or "  |cffffffffKP " .. state.kp .. "|r")
+    end
+    return text
+end
+
+-- Invisible hover area over a profession row that explains its weekly icons.
+function EMSidecarMixin:KnowledgeHover(parent, rowY, d, state, since)
+    local hover = self._pool:Acquire("kwHover", function()
+        local f = CreateFrame("Frame", nil, parent)
+        f:EnableMouse(true)
+        return f
+    end)
+    hover:SetPoint("TOPLEFT", parent, "TOPLEFT", 120, -rowY)
+    hover:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+    hover:SetHeight(LINE_HEIGHT)
+    hover:SetScript("OnEnter", function(f)
+        GameTooltip:SetOwner(f, "ANCHOR_CURSOR_RIGHT")
+        GameTooltip:AddLine("This Week", 1, 0.82, 0)
+        GameTooltip:AddLine(" ")
+        EmpireManager:AddKnowledgeLines(d, state)
+        if since then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Updated " .. EmpireManager:FormatTimeSince(since), 1, 1, 1)
+        end
+        GameTooltip:Show()
+    end)
+    hover:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+end
+
+function EMSidecarMixin:BuildDetails(content, y, entry, guid)
     local RACE_NAMES = EmpireManager.RACE_NAMES
     local parent = content
 
@@ -610,6 +800,7 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
         -- Grow row height when text wraps so subsequent rows don't overlap
         local h = val:GetStringHeight()
         y = y + math.max(LINE_HEIGHT, math.ceil(h) + 2)
+        return val
     end
 
     local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
@@ -669,6 +860,7 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
             addRow("Roles", table.concat(roleNames, ", "), 1, 1, 1)
         end
         if hasProfs then
+            local weekly, textW = {}, 0
             for _, p in ipairs(entry.professions) do
                 local skill, maxSkill = p.skill or 0, p.maxSkill or 0
                 local newest = EmpireManager:NewestExpansionSkill(p)
@@ -680,7 +872,31 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
                 if profInfo then
                     r, g, b = profInfo.r, profInfo.g, profInfo.b
                 end
-                addRow("", string.format("%s %d/%d", p.name, skill, maxSkill), r, g, b)
+                local d = p.skillLineID and EmpireManager.KNOWLEDGE_WEEKLY[p.skillLineID]
+                local state = d and EmpireManager:GetKnowledgeState(entry, p.skillLineID)
+                local rowY = y
+                local fs = addRow("", string.format("%s %d/%d", p.name, skill, maxSkill), r, g, b)
+                if state then
+                    weekly[#weekly + 1] = { y = rowY, d = d, state = state }
+                end
+                if fs then
+                    textW = math.max(textW, fs:GetStringWidth())
+                end
+            end
+            -- Icons line up in one column after the widest profession text, at least as
+            -- far right as the widest English one, so localized names push it further.
+            if #weekly > 0 then
+                local ref = self:Text(parent)
+                ref:SetText("Leatherworking 100/100")
+                textW = math.max(textW, ref:GetStringWidth())
+                ref:Hide()
+                for _, row in ipairs(weekly) do
+                    local icons = self:Text(parent)
+                    icons:SetPoint("TOPLEFT", parent, "TOPLEFT", 120 + math.ceil(textW) + 12, -row.y)
+                    icons:SetText(KnowledgeIcons(row.d, row.state))
+                    local since = guid ~= EmpireManager.playerGUID and entry.kw.time
+                    self:KnowledgeHover(parent, row.y, row.d, row.state, since)
+                end
             end
         end
     end

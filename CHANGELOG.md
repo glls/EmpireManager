@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.0] - 2026-10-31
+
+### Added
+
+- **Weekly profession Knowledge tracker.** For each Midnight profession, the character panel's Details tab shows whether this week's Treatise is used, whether the weekly profession quest is done, and your unspent Knowledge Points. Hover a row for details. Other characters show what was recorded at their last login. A character with Inscription assigned as Artisan also gets a reminder at login and when opening Inscription, listing how many Treatises your characters still need this week, minus the ones it already has in bags, bank and Warband bank. By default only professions assigned to each character count; turn off "Assigned Professions Only for Treatise Hint" in General settings to count every learned profession.
+- **Weekly progress on the dashboard.** Midnight profession icons get a colored border: green when the Treatise is used and the weekly quest is done, yellow when partly done, red when neither is started. Hover the Profession icons to see the details.
+- **Favorite mounts per character.** Each character can have its own favorite mounts, separate from the Mount Journal favorites shared by all your characters. Pick them in the character panel's Assignments tab and summon one at random with a keybind or a macro.
+- **Keybinds** for Toggle Dashboard, Toggle Bag Triage and Summon Mount, under Options > Keybindings > EmpireManager.
+
+### Fixed
+
+- **Regions on one account keep separate data.** US and EU characters on the same Battle.net license shared one roster. Each region now has its own. Your existing data stays with the first region you log into after updating.
+
 ## [1.2.10] - 2026-10-27
 
 ### Added

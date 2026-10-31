@@ -1,0 +1,11 @@
+<Bindings>
+  <Binding name="EMPIREMANAGER_DASHBOARD" category="EmpireManager">
+    LibStub("AceAddon-3.0"):GetAddon("EmpireManager"):ToggleDashboard()
+  </Binding>
+  <Binding name="EMPIREMANAGER_TRIAGE" category="EmpireManager">
+    LibStub("AceAddon-3.0"):GetAddon("EmpireManager"):ToggleTriageOverlay()
+  </Binding>
+  <Binding name="EMPIREMANAGER_MOUNT" category="EmpireManager">
+    LibStub("AceAddon-3.0"):GetAddon("EmpireManager"):MountCommand("")
+  </Binding>
+</Bindings>

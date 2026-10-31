@@ -9,6 +9,10 @@ local EmpireManager = LibStub("AceAddon-3.0"):NewAddon("EmpireManager", "AceCons
 EmpireManager.version = C_AddOns.GetAddOnMetadata("EmpireManager", "Version") or "?"
 EmpireManager.description = C_AddOns.GetAddOnMetadata("EmpireManager", "Notes") or ""
 
+_G.BINDING_NAME_EMPIREMANAGER_DASHBOARD = "Toggle Dashboard"
+_G.BINDING_NAME_EMPIREMANAGER_TRIAGE = "Toggle Bag Triage"
+_G.BINDING_NAME_EMPIREMANAGER_MOUNT = "Summon Mount"
+
 -- Single source of truth for the slash-command list. Rendered in the Options
 -- panel, the About tab, and the `/em help` chat output.
 EmpireManager.SLASH_COMMANDS = {
@@ -24,6 +28,7 @@ EmpireManager.SLASH_COMMANDS = {
     { cmd = "/em ie", desc = "Open the Import / Export window" },
     { cmd = "/em cc", desc = "Copy chat text (Chat Copy window)" },
     { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
+    { cmd = "/em mount", desc = "Summon one of this Character's mounts, or dismount" },
     { cmd = "/em wipe <target>", desc = "|cffff8800Destructive|r: <target> = chars / rules / keeplist / vendorw / restock / all" },
     { cmd = "/em help", desc = "Show all commands in chat" },
 }
@@ -51,6 +56,7 @@ local DB_DEFAULTS = {
             chatMessages = true, -- print bulk-op status to chat (errors always show)
             verboseMessages = false, -- print internal progress lines (restacking, snapshots, "depositing..." intent)
             showHints = true, -- print [Hint] lines (upgradeable bags, unpurchased tabs, etc.)
+            treatiseAssignedOnly = true, -- Treatise hint counts only professions assigned in the Sidecar (Artisan/Gatherer)
             popupOnBank = true, -- triage reminder on bank open
             popupOnGuildBank = true, -- misplaced scan on guild bank open
             popupOnMailbox = true, -- routable reminder on mailbox open
@@ -88,6 +94,27 @@ local DB_DEFAULTS = {
 }
 
 function EmpireManager:OnInitialize()
+    -- Regions share one saved file: the active one lives in `global`, others in `regions` (docs/CORE.md).
+    local sv = EmpireManagerDB or {}
+    EmpireManagerDB = sv
+    local regionName = GetCurrentRegionName()
+    if regionName == "" then
+        regionName = nil
+    end
+    local region = ({ "US", "KR", "EU", "TW", "CN" })[GetCurrentRegion()] or regionName or "XX"
+    local active = sv.activeRegion or region
+    if active ~= region then
+        sv.regions = sv.regions or {}
+        sv.regions[active] = sv.global
+        sv.global = sv.regions[region]
+        sv.regions[region] = nil
+        if not next(sv.regions) then
+            sv.regions = nil
+        end
+    end
+    sv.activeRegion = region
+    self.region = region
+
     self.db = LibStub("AceDB-3.0"):New("EmpireManagerDB", DB_DEFAULTS)
 
     -- Ensure nested saved-data tables exist (AceDB defaults don't materialize them)
@@ -481,13 +508,23 @@ function EmpireManager:OnInitialize()
         chatMsgsInit
     )
 
-    AddCheckbox(
+    local _, showHintsInit = AddCheckbox(
         generalCat,
         "showHints",
         "Show Hints",
         "Print [Hint] lines like upgradeable bag reminders and unpurchased bank tab notices.",
         nil,
         chatMsgsInit
+    )
+
+    AddCheckbox(
+        generalCat,
+        "treatiseAssignedOnly",
+        "Assigned Professions Only for Treatise Hint",
+        "The Inscription Artisan's Treatise hint counts a character's profession only when it is assigned "
+            .. "to that character (Artisan or Gatherer). When off, every learned Midnight profession counts.",
+        nil,
+        showHintsInit
     )
 
     -- Always Compare Items (CVar, not stored in our DB)
@@ -965,6 +1002,10 @@ function EmpireManager:OnEnable()
     -- Catch the initial spec pick on a fresh character (and later respecs);
     -- OnEnable snapshots spec once, so without this it stays stale until relog.
     self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+    -- Weekly Knowledge tracker: quest turn-in/accept, Treatise use and KP spend.
+    self:RegisterEvent("QUEST_TURNED_IN")
+    self:RegisterEvent("QUEST_ACCEPTED")
+    self:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
 
     -- Request playtime (async → triggers TIME_PLAYED_MSG). Silent variant suppresses
     -- Blizzard's chat output for our request; user-typed /played still prints normally.
@@ -1066,6 +1107,9 @@ function EmpireManager:SlashHandler(input)
             return
         end
         self:_DumpDebug(target)
+    elseif cmd == "mount" then
+        local _, sub = self:GetArgs(input, 2)
+        self:MountCommand(sub and sub:lower() or "")
     elseif cmd == "gendata" then
         -- Dev helper: dump RESTOCK_ITEMS itemIDs from the loaded AH browse results,
         -- grouped by Trade Goods subclass. Accumulates across runs (one search per
@@ -1196,6 +1240,291 @@ local function InspectQualityTier(itemID, itemLink)
         end
     end
     return reagentQ, craftedQ, atlas
+end
+
+local GROUND, FLYING, AQUATIC = { ground = true }, { flying = true }, { aquatic = true }
+local MOUNT_KINDS = {
+    [230] = GROUND, [241] = GROUND, [284] = GROUND, [412] = GROUND,
+    [402] = FLYING, [424] = FLYING, [437] = FLYING,
+    [231] = AQUATIC, [254] = AQUATIC, [407] = AQUATIC,
+    [436] = { flying = true, aquatic = true },
+}
+
+function EmpireManager:MountCommand(sub)
+    local P = "|cffffd100[EmpireManager]|r "
+    local entry = self:GetCurrentEntry()
+    local function refresh()
+        if EmpireManagerSidecar and EmpireManagerSidecar:IsShown() and self.sidecarGUID == self.playerGUID then
+            EmpireManagerSidecar:Populate(self.playerGUID)
+        end
+    end
+    if sub == "set" or sub == "clear" then
+        if not entry then
+            self:ChatMsg(P .. "This Character is not in the Roster.", true)
+            return
+        end
+        if sub == "clear" then
+            entry.favMounts = nil
+            self:ChatMsg(P .. "Mounts cleared. /em mount now summons a random favorite.", true)
+            refresh()
+            return
+        end
+        if not IsMounted() then
+            self:ChatMsg(P .. "Mount up first, then run /em mount set.", true)
+            return
+        end
+        for _, mountID in ipairs(C_MountJournal.GetMountIDs()) do
+            local name, _, _, isActive = C_MountJournal.GetMountInfoByID(mountID)
+            if isActive then
+                entry.favMounts = entry.favMounts or {}
+                entry.favMounts[mountID] = true
+                self:ChatMsg(P .. "Mount added: |cffffffff" .. name .. "|r", true)
+                refresh()
+                return
+            end
+        end
+        self:ChatMsg(P .. "Could not find the mount you are riding in the Mount Journal.", true)
+        return
+    end
+
+    if IsMounted() then
+        Dismount()
+        return
+    end
+    local want = IsSubmerged() and "aquatic" or IsFlyableArea() and "flying" or "ground"
+    local usable, matching = {}, {}
+    if entry and entry.favMounts then
+        for mountID in pairs(entry.favMounts) do
+            local name, _, _, _, isUsable, _, _, _, _, _, isCollected = C_MountJournal.GetMountInfoByID(mountID)
+            if name and isCollected and isUsable then
+                usable[#usable + 1] = mountID
+                local kinds = MOUNT_KINDS[select(5, C_MountJournal.GetMountInfoExtraByID(mountID))]
+                if kinds and kinds[want] then
+                    matching[#matching + 1] = mountID
+                end
+            end
+        end
+        if #usable == 0 then
+            self:ChatMsg(P .. "None of your mounts can be summoned here, using a random favorite.", true)
+        end
+    end
+    local pool = #matching > 0 and matching or usable
+    C_MountJournal.SummonByID(#pool > 0 and pool[math.random(#pool)] or 0)
+end
+
+local MOUNT_MACRO = "EM Mount"
+
+function EmpireManager:PickupMountMacro()
+    local P = "|cffffd100[EmpireManager]|r "
+    if InCombatLockdown() then
+        self:ChatMsg(P .. "Macros cannot be created in combat.", true)
+        return
+    end
+    local index = GetMacroIndexByName(MOUNT_MACRO)
+    if index == 0 then
+        if GetNumMacros() >= Constants.MacroConsts.MAX_ACCOUNT_MACROS then
+            self:ChatMsg(P .. "No free general macro slot.", true)
+            return
+        end
+        index = CreateMacro(MOUNT_MACRO, "Ability_Mount_RidingHorse", "/em mount")
+    end
+    PickupMacro(index)
+end
+
+-- Weekly Knowledge tracker (docs/KNOWLEDGE.md). Snapshot of the logged-in character,
+-- stored as entry.kw = { week, time, [baseSkillLine] = { treatise, quest, kp } }.
+function EmpireManager:WeekKey()
+    return math.floor((GetServerTime() + C_DateAndTime.GetSecondsUntilWeeklyReset()) / 3600 + 0.5)
+end
+
+function EmpireManager:SnapshotKnowledge()
+    local entry = self:GetCurrentEntry()
+    if not entry then
+        return
+    end
+    local kw = { week = self:WeekKey(), time = time() }
+    for _, p in ipairs(entry.professions or {}) do
+        local d = p.skillLineID and self.KNOWLEDGE_WEEKLY[p.skillLineID]
+        if d and C_SpellBook.IsSpellKnown(d.spell) then
+            local s = {}
+            if C_QuestLog.IsQuestFlaggedCompleted(d.treatise) then
+                s.treatise = "done"
+            elseif C_Item.GetItemCount(d.item) > 0 then
+                s.treatise = "bags"
+            end
+            for _, questID in ipairs(d.quests) do
+                if C_QuestLog.IsQuestFlaggedCompleted(questID) then
+                    s.quest = "done"
+                    break
+                elseif C_QuestLog.IsOnQuest(questID) then
+                    s.quest = "active"
+                end
+            end
+            local cur = C_ProfSpecs.GetCurrencyInfoForSkillLine(d.tier)
+            s.kp = cur and cur.numAvailable
+            kw[p.skillLineID] = s
+        end
+    end
+    entry.kw = kw
+    if self.RefreshVisibleRows then
+        self:RefreshVisibleRows()
+    end
+    if EmpireManagerSidecar and EmpireManagerSidecar:IsShown() and self.sidecarGUID == self.playerGUID
+        and EmpireManagerSidecar._selectedTab == 2 then
+        EmpireManagerSidecar:Populate(self.playerGUID)
+    end
+end
+
+-- This week's state for one profession; a snapshot from an earlier week keeps only KP.
+function EmpireManager:GetKnowledgeState(entry, skillLineID)
+    local kw = entry.kw
+    local s = kw and kw[skillLineID]
+    if not s then
+        return nil
+    end
+    if kw.week ~= self:WeekKey() then
+        return { kp = s.kp }
+    end
+    return s
+end
+
+local KW_GREEN, KW_YELLOW, KW_RED = { 0, 0.8, 0 }, { 1, 0.8, 0 }, { 1, 0.2, 0.2 }
+local kwColors = {}
+
+-- Profession key -> border color for this week: green = Treatise used and quest done,
+-- red = neither started, yellow = anything in between. Reused table, read it right away.
+function EmpireManager:KnowledgeColors(entry)
+    wipe(kwColors)
+    if not entry.kw then
+        return kwColors
+    end
+    for _, p in ipairs(entry.professions or {}) do
+        local d = p.skillLineID and self.KNOWLEDGE_WEEKLY[p.skillLineID]
+        local s = d and self:GetKnowledgeState(entry, p.skillLineID)
+        if s then
+            if s.treatise == "done" and s.quest == "done" then
+                kwColors[d.key] = KW_GREEN
+            elseif not s.treatise and not s.quest then
+                kwColors[d.key] = KW_RED
+            else
+                kwColors[d.key] = KW_YELLOW
+            end
+        end
+    end
+    return kwColors
+end
+
+EmpireManager.KW_QUEST_ICON = "|A:QuestNormal:14:14|a"
+local KW_TREATISE_TEXT = { done = "used", bags = "in bags, not used yet" }
+local KW_QUEST_TEXT = { done = "done", active = "accepted, not turned in" }
+
+-- Treatise / weekly quest / unspent KP lines for one profession (Sidecar and Dashboard tooltips).
+function EmpireManager:AddKnowledgeLines(d, state, indent)
+    indent = indent or ""
+    local icon = string.format("|T%d:14:14|t ", C_Item.GetItemIconByID(d.item) or 134400)
+    GameTooltip:AddLine(indent .. icon .. "Treatise: " .. (KW_TREATISE_TEXT[state.treatise] or "not used"), 1, 1, 1)
+    GameTooltip:AddLine(
+        indent .. self.KW_QUEST_ICON .. " Weekly quest: " .. (KW_QUEST_TEXT[state.quest] or "not done"),
+        1,
+        1,
+        1
+    )
+    if state.kp then
+        GameTooltip:AddLine(indent .. "Unspent Knowledge Points: " .. state.kp, 1, 1, 1)
+    end
+end
+
+-- [Hint] for the Inscription Artisan: Treatises the characters still need this week (not
+-- used, none in their bags), less the ones this character already has. Characters with no
+-- weekly snapshot yet are skipped and only counted in the note.
+function EmpireManager:HintTreatises()
+    local me = self:GetCurrentEntry()
+    local artisan = me and me.assignments and me.assignments.artisan
+    if type(artisan) ~= "table" or not artisan.inscription then
+        return
+    end
+    local need, noData = {}, 0
+    local assignedOnly = self.db.global.options.treatiseAssignedOnly
+    for _, entry in pairs(self.db.global.registry) do
+        local hasMidnight = false
+        local assigned = assignedOnly and self:GetAssignedProfs(entry)
+        for _, p in ipairs(entry.professions or {}) do
+            local d = p.skillLineID and self.KNOWLEDGE_WEEKLY[p.skillLineID]
+            if d and (not assigned or assigned[d.key]) then
+                hasMidnight = true
+                local s = entry.kw and self:GetKnowledgeState(entry, p.skillLineID)
+                if s and not s.treatise then
+                    need[p.skillLineID] = (need[p.skillLineID] or 0) + 1
+                end
+            end
+        end
+        if hasMidnight and not entry.kw then
+            noData = noData + 1
+        end
+    end
+    local parts = {}
+    for skillLine, n in pairs(need) do
+        local d = self.KNOWLEDGE_WEEKLY[skillLine]
+        -- Bags + character bank + Warband bank. One in this character's own bags already
+        -- covers its own need (state "bags"), so it is not counted again.
+        local have = C_Item.GetItemCount(d.item, true, false, true, true) or 0
+        local mine = self:GetKnowledgeState(me, skillLine)
+        if mine and mine.treatise == "bags" then
+            have = have - 1
+        end
+        n = n - math.max(have, 0)
+        local info = self.PROF_INFO_BY_KEY[d.key]
+        if n > 0 and info then
+            parts[#parts + 1] = info.label .. " x" .. n
+        end
+    end
+    if #parts == 0 then
+        return
+    end
+    table.sort(parts)
+    local note = noData > 0 and string.format(" (%d characters not counted, no weekly data yet)", noData) or ""
+    self:ChatHint("|cff4d99ff[Hint]|r Treatises to craft this week: " .. table.concat(parts, ", ") .. note)
+end
+
+-- Quest turn-in flags read true only ~1s after the event, and several events can
+-- arrive together (currency + quest), so they all share one delayed snapshot.
+function EmpireManager:QueueKnowledgeSnapshot()
+    if self._kwQueued then
+        return
+    end
+    self._kwQueued = true
+    C_Timer.After(1, function()
+        self._kwQueued = nil
+        self:SnapshotKnowledge()
+    end)
+end
+
+local function IsKnowledgeQuest(self, questID)
+    if not self._kwQuests then
+        self._kwQuests = {}
+        for _, d in pairs(self.KNOWLEDGE_WEEKLY) do
+            for _, q in ipairs(d.quests) do
+                self._kwQuests[q] = true
+            end
+        end
+    end
+    return self._kwQuests[questID]
+end
+
+function EmpireManager:QUEST_TURNED_IN(_, questID)
+    if IsKnowledgeQuest(self, questID) then
+        self:QueueKnowledgeSnapshot()
+    end
+end
+
+function EmpireManager:QUEST_ACCEPTED(_, questID)
+    if IsKnowledgeQuest(self, questID) then
+        self:QueueKnowledgeSnapshot()
+    end
+end
+
+function EmpireManager:CURRENCY_DISPLAY_UPDATE()
+    self:QueueKnowledgeSnapshot()
 end
 
 -- Dev helper (`/em inspect`): report every value classification reads for the item
@@ -2043,6 +2372,11 @@ function EmpireManager:TRADE_SKILL_SHOW()
 
     -- Snapshot per-expansion skill breakdown for the open profession
     self:SnapshotExpansionSkills(entry)
+    self:SnapshotKnowledge()
+    local base = C_TradeSkillUI.GetBaseProfessionInfo and C_TradeSkillUI.GetBaseProfessionInfo()
+    if base and base.profession and self.ENUM_PROFESSION_TO_KEY[base.profession] == "inscription" then
+        self:HintTreatises()
+    end
 
     self:RefreshAfterProfessionChange(guid)
 end
@@ -3024,7 +3358,7 @@ function EmpireManager:PLAYER_EQUIPMENT_CHANGED()
     end
 end
 
-function EmpireManager:PLAYER_ENTERING_WORLD()
+function EmpireManager:PLAYER_ENTERING_WORLD(_, isInitialLogin, isReloadingUi)
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
     if not entry then
@@ -3041,6 +3375,10 @@ function EmpireManager:PLAYER_ENTERING_WORLD()
     -- Snapshot bag item counts so "Character Bags" restock entries show a fill
     -- level for this character without needing a bank open.
     self:SnapshotBagItemCounts()
+    self:SnapshotKnowledge()
+    if isInitialLogin or isReloadingUi then
+        self:HintTreatises()
+    end
 
     -- One-time hint: registry has chars but no storage rules yet.
     if not self.db.global.wizardHintSeen and not self.db.global.wizardSeen then

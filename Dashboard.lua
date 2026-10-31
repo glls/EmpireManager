@@ -146,6 +146,36 @@ function EMCharacterRowMixin:OnLoad()
             fs:SetWidth(col.width - 4 - padL - padR)
             fs:SetPoint("LEFT", self, "LEFT", xOffset + 2 + padL, 0)
             self.cells[col.key] = fs
+            if col.key == "profTags" then
+                -- Weekly Knowledge borders over the inline icons (the text is untouched). A
+                -- child frame so they draw above the text. Each border is 4 solid 1px lines,
+                -- so every icon gets the same thickness (a scaled frame texture snapped to
+                -- 1 or 2 pixels depending on the icon's sub-pixel position).
+                local layer = CreateFrame("Frame", nil, self)
+                layer:SetAllPoints()
+                layer:SetFrameLevel(self:GetFrameLevel() + 2)
+                self.profBorders = {}
+                for i = 1, 4 do
+                    local border = CreateFrame("Frame", nil, layer)
+                    border.lines = {}
+                    for j = 1, 4 do
+                        local line = border:CreateTexture(nil, "OVERLAY")
+                        line:SetColorTexture(1, 1, 1)
+                        border.lines[j] = line
+                    end
+                    local top, bottom, left, right = unpack(border.lines)
+                    top:SetPoint("TOPLEFT")
+                    top:SetPoint("TOPRIGHT")
+                    bottom:SetPoint("BOTTOMLEFT")
+                    bottom:SetPoint("BOTTOMRIGHT")
+                    left:SetPoint("TOPLEFT")
+                    left:SetPoint("BOTTOMLEFT")
+                    right:SetPoint("TOPRIGHT")
+                    right:SetPoint("BOTTOMRIGHT")
+                    border:Hide()
+                    self.profBorders[i] = border
+                end
+            end
         end
         xOffset = xOffset + col.width
     end
@@ -222,9 +252,70 @@ function EMCharacterRowMixin:Populate(data)
 
     -- Profession tags
     self.cells.profTags:SetText(EmpireManager:FormatProfTags(entry.assignments))
+    self:UpdateProfBorders(entry)
 
     -- Roles
     self.cells.roles:SetText(EmpireManager:FormatRoles(entry.assignments))
+end
+
+-- An inline 20px icon renders a bit narrower (18.9px measured) and the space between
+-- icons is ~2.5px, so both are measured once in the cell's own font.
+local profIconW, profGapW
+
+local function MeasureProfIcons(fs)
+    local probe = fs:GetParent():CreateFontString(nil, "OVERLAY")
+    probe:SetFontObject(fs:GetFontObject())
+    local icon = "|T134400:20:20|t"
+    probe:SetText(icon)
+    profIconW = probe:GetStringWidth()
+    probe:SetText(icon .. " " .. icon)
+    profGapW = probe:GetStringWidth() - 2 * profIconW
+    probe:SetText("")
+    probe:Hide()
+end
+
+-- Borders sit on the icons of the rendered (centered) icon line without moving anything.
+function EMCharacterRowMixin:UpdateProfBorders(entry)
+    local borders = self.profBorders
+    for _, border in ipairs(borders) do
+        border:Hide()
+    end
+    local colors = EmpireManager:KnowledgeColors(entry)
+    if not next(colors) then
+        return
+    end
+    local profSet = EmpireManager:GetAssignedProfs(entry)
+    local keys = {}
+    for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
+        if profSet[info.key] then
+            keys[#keys + 1] = info.key
+        end
+    end
+    local fs = self.cells.profTags
+    if not profIconW then
+        MeasureProfIcons(fs)
+    end
+    local w = #keys * profIconW + (#keys - 1) * profGapW
+    for i, key in ipairs(keys) do
+        local c = colors[key]
+        local border = borders[i]
+        if c and border then
+            -- Box and line widths rounded to whole screen pixels (lines at least 1 pixel).
+            border:ClearAllPoints()
+            PixelUtil.SetSize(border, profIconW, profIconW)
+            local x = -w / 2 + profIconW / 2 + (i - 1) * (profIconW + profGapW)
+            PixelUtil.SetPoint(border, "CENTER", fs, "CENTER", x, 0)
+            local top, bottom, left, right = unpack(border.lines)
+            PixelUtil.SetHeight(top, 1, 1)
+            PixelUtil.SetHeight(bottom, 1, 1)
+            PixelUtil.SetWidth(left, 1, 1)
+            PixelUtil.SetWidth(right, 1, 1)
+            for _, line in ipairs(border.lines) do
+                line:SetVertexColor(c[1], c[2], c[3])
+            end
+            border:Show()
+        end
+    end
 end
 
 function EMCharacterRowMixin:UpdateSelected()
@@ -395,6 +486,8 @@ function EMCharacterRowMixin:ShowProfTooltip()
             end
         end
     end
+    -- Midnight professions also list this week's Knowledge progress under their line.
+    local hasWeekly = false
     for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
         if profSet[info.key] then
             local profData = profByName[info.key]
@@ -403,6 +496,12 @@ function EMCharacterRowMixin:ShowProfTooltip()
                 label = string.format("%s (%d)", info.label, profData.skill)
             end
             GameTooltip:AddLine(string.format(ICON16_FMT, info.icon, label), info.r, info.g, info.b)
+            local d = profData and profData.skillLineID and EmpireManager.KNOWLEDGE_WEEKLY[profData.skillLineID]
+            local state = d and EmpireManager:GetKnowledgeState(entry, profData.skillLineID)
+            if state then
+                EmpireManager:AddKnowledgeLines(d, state, "    ")
+                hasWeekly = true
+            end
         end
     end
     -- Secondary professions (Fishing/Cooking/Archaeology) have no role assignment,
@@ -415,6 +514,10 @@ function EMCharacterRowMixin:ShowProfTooltip()
                 GameTooltip:AddLine(string.format(ICON16_FMT, info.icon, label), info.r, info.g, info.b)
             end
         end
+    end
+    if hasWeekly and self._guid ~= UnitGUID("player") then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Updated " .. EmpireManager:FormatTimeSince(entry.kw.time), 1, 1, 1)
     end
     GameTooltip:Show()
 end
